@@ -18,9 +18,16 @@
 // URLs
 //
 // For blob.OpenBucket, gcsblob registers for the scheme "gs".
-// The default URL opener will creating a connection using use default
-// credentials from the environment, as described in
+// The default URL opener will set up a connection using default credentials
+// from the environment, as described in
 // https://cloud.google.com/docs/authentication/production.
+// Some environments, such as GCE, come without a private key. In such cases
+// the IAM Credentials API will be configured for use in Options.MakeSignBytes,
+// which will introduce latency to any and all calls to bucket.SignedURL
+// that you can avoid by installing a service account credentials file or
+// obtaining and configuring a private key:
+// https://cloud.google.com/iam/docs/creating-managing-service-account-keys
+//
 // To customize the URL opener, or for more details on the URL format,
 // see URLOpener.
 // See https://gocloud.dev/concepts/urls/ for background information.
@@ -41,36 +48,41 @@
 //  - ListObject: storage.ObjectAttrs
 //  - ListOptions.BeforeList: *storage.Query
 //  - Reader: *storage.Reader
-//  - ReaderOptions.BeforeRead: **storage.ObjectHandle, *storage.Reader
+//  - ReaderOptions.BeforeRead: **storage.ObjectHandle, *storage.Reader (if accessing both, must be in that order)
 //  - Attributes: storage.ObjectAttrs
-//  - CopyOptions.BeforeCopy: *CopyObjectHandles, *storage.Copier
-//  - WriterOptions.BeforeWrite: **storage.ObjectHandle, *storage.Writer
+//  - CopyOptions.BeforeCopy: *CopyObjectHandles, *storage.Copier (if accessing both, must be in that order)
+//  - WriterOptions.BeforeWrite: **storage.ObjectHandle, *storage.Writer (if accessing both, must be in that order)
 package gcsblob // import "gocloud.dev/blob/gcsblob"
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"io/ioutil"
 	"net/http"
 	"net/url"
+	"os"
 	"sort"
 	"strings"
 	"sync"
 	"time"
 
+	"cloud.google.com/go/compute/metadata"
 	"cloud.google.com/go/storage"
 	"github.com/google/wire"
+	"golang.org/x/oauth2/google"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/iterator"
+	"google.golang.org/api/option"
+
 	"gocloud.dev/blob"
 	"gocloud.dev/blob/driver"
 	"gocloud.dev/gcerrors"
 	"gocloud.dev/gcp"
 	"gocloud.dev/internal/escape"
 	"gocloud.dev/internal/useragent"
-	"google.golang.org/api/googleapi"
-	"google.golang.org/api/iterator"
-	"google.golang.org/api/option"
 )
 
 const defaultPageSize = 1000
@@ -84,7 +96,48 @@ var Set = wire.NewSet(
 	wire.Struct(new(URLOpener), "Client"),
 )
 
-// lazyCredsOpener obtains Application Default Credentials on the first call
+// readDefaultCredentials gets the field values from the supplied JSON data.
+// For its possible formats please see
+// https://cloud.google.com/iam/docs/creating-managing-service-account-keys#iam-service-account-keys-create-go
+//
+// Use "golang.org/x/oauth2/google".DefaultCredentials.JSON to get
+// the contents of the preferred credential file.
+//
+// Returns null-values for fields that have not been obtained.
+func readDefaultCredentials(credFileAsJSON []byte) (AccessID string, PrivateKey []byte) {
+	// For example, a credentials file as generated for service accounts through the web console.
+	var contentVariantA struct {
+		ClientEmail string `json:"client_email"`
+		PrivateKey  string `json:"private_key"`
+	}
+	if err := json.Unmarshal(credFileAsJSON, &contentVariantA); err == nil {
+		AccessID = contentVariantA.ClientEmail
+		PrivateKey = []byte(contentVariantA.PrivateKey)
+	}
+	if AccessID != "" {
+		return
+	}
+
+	// If obtained through the REST API.
+	var contentVariantB struct {
+		Name           string `json:"name"`
+		PrivateKeyData string `json:"privateKeyData"`
+	}
+	if err := json.Unmarshal(credFileAsJSON, &contentVariantB); err == nil {
+		nextFieldIsAccessID := false
+		for _, s := range strings.Split(contentVariantB.Name, "/") {
+			if nextFieldIsAccessID {
+				AccessID = s
+				break
+			}
+			nextFieldIsAccessID = s == "serviceAccounts"
+		}
+		PrivateKey = []byte(contentVariantB.PrivateKeyData)
+	}
+
+	return
+}
+
 // lazyCredsOpener obtains Application Default Credentials on the first call
 // to OpenBucketURL.
 type lazyCredsOpener struct {
@@ -95,17 +148,42 @@ type lazyCredsOpener struct {
 
 func (o *lazyCredsOpener) OpenBucketURL(ctx context.Context, u *url.URL) (*blob.Bucket, error) {
 	o.init.Do(func() {
-		creds, err := gcp.DefaultCredentials(ctx)
-		if err != nil {
-			o.err = err
-			return
+		var opts Options
+		var creds *google.Credentials
+		if os.Getenv("STORAGE_EMULATOR_HOST") != "" {
+			creds, _ = google.CredentialsFromJSON(ctx, []byte(`{"type": "service_account", "project_id": "my-project-id"}`))
+		} else {
+			var err error
+			creds, err = gcp.DefaultCredentials(ctx)
+			if err != nil {
+				o.err = err
+				return
+			}
+
+			// Populate default values from credentials files, where available.
+			opts.GoogleAccessID, opts.PrivateKey = readDefaultCredentials(creds.JSON)
+
+			// … else, on GCE, at least get the instance's main service account.
+			if opts.GoogleAccessID == "" && metadata.OnGCE() {
+				mc := metadata.NewClient(nil)
+				opts.GoogleAccessID, _ = mc.Email("")
+			}
 		}
+
+		// Provide a default factory for SignBytes for environments without a private key.
+		if len(opts.PrivateKey) <= 0 && opts.GoogleAccessID != "" {
+			iam := new(credentialsClient)
+			// We cannot hold onto the first context: it might've been cancelled already.
+			ctx := context.Background()
+			opts.MakeSignBytes = iam.CreateMakeSignBytesWith(ctx, opts.GoogleAccessID)
+		}
+
 		client, err := gcp.NewHTTPClient(gcp.DefaultTransport(), creds.TokenSource)
 		if err != nil {
 			o.err = err
 			return
 		}
-		o.opener = &URLOpener{Client: client}
+		o.opener = &URLOpener{Client: client, Options: opts}
 	})
 	if o.err != nil {
 		return nil, fmt.Errorf("open bucket %v: %v", u, o.err)
@@ -125,6 +203,8 @@ const Scheme = "gs"
 //
 //   - access_id: sets Options.GoogleAccessID
 //   - private_key_path: path to read for Options.PrivateKey
+//
+// Currently their use is limited to SignedURL.
 type URLOpener struct {
 	// Client must be set to a non-nil HTTP client authenticated with
 	// Cloud Storage scope or equivalent.
@@ -151,8 +231,12 @@ func (o *URLOpener) forParams(ctx context.Context, q url.Values) (*Options, erro
 	}
 	opts := new(Options)
 	*opts = o.Options
-	if accessID := q.Get("access_id"); accessID != "" {
+	if accessID := q.Get("access_id"); accessID != "" && accessID != opts.GoogleAccessID {
 		opts.GoogleAccessID = accessID
+		opts.PrivateKey = nil // Clear any previous key unrelated to the new accessID.
+
+		// Clear this as well to prevent calls with the old and mismatched accessID.
+		opts.MakeSignBytes = nil
 	}
 	if keyPath := q.Get("private_key_path"); keyPath != "" {
 		pk, err := ioutil.ReadFile(keyPath)
@@ -160,6 +244,11 @@ func (o *URLOpener) forParams(ctx context.Context, q url.Values) (*Options, erro
 			return nil, err
 		}
 		opts.PrivateKey = pk
+	} else if _, exists := q["private_key_path"]; exists {
+		// A possible default value has been cleared by setting this to an empty value:
+		// The private key might have expired, or falling back to SignBytes/MakeSignBytes
+		// is intentional such as for tests or involving a key stored in a HSM/TPM.
+		opts.PrivateKey = nil
 	}
 	return opts, nil
 }
@@ -177,10 +266,17 @@ type Options struct {
 	PrivateKey []byte
 
 	// SignBytes is a function for implementing custom signing.
-	// Exactly one of PrivateKey or SignBytes must be non-nil to use SignedURL.
+	// Exactly one of PrivateKey, SignBytes, or MakeSignBytes must be non-nil to use SignedURL.
 	// See https://godoc.org/cloud.google.com/go/storage#SignedURLOptions.
 	SignBytes func([]byte) ([]byte, error)
+
+	// MakeSignBytes is a factory for functions that are being used in place of an empty SignBytes.
+	// If your implementation of 'SignBytes' needs a request context, set this instead.
+	MakeSignBytes func(requestCtx context.Context) SignBytesFunc
 }
+
+// SignBytesFunc is shorthand for the signature of Options.SignBytes.
+type SignBytesFunc func([]byte) ([]byte, error)
 
 // openBucket returns a GCS Bucket that communicates using the given HTTP client.
 func openBucket(ctx context.Context, client *gcp.HTTPClient, bucketName string, opts *Options) (*bucket, error) {
@@ -190,8 +286,18 @@ func openBucket(ctx context.Context, client *gcp.HTTPClient, bucketName string, 
 	if bucketName == "" {
 		return nil, errors.New("gcsblob.OpenBucket: bucketName is required")
 	}
+
+	clientOpts := []option.ClientOption{option.WithHTTPClient(useragent.HTTPClient(&client.Client, "blob"))}
+	if host := os.Getenv("STORAGE_EMULATOR_HOST"); host != "" {
+		clientOpts = []option.ClientOption{
+			option.WithoutAuthentication(),
+			option.WithEndpoint("http://" + host + "/storage/v1/"),
+			option.WithHTTPClient(http.DefaultClient),
+		}
+	}
+
 	// We wrap the provided http.Client to add a Go CDK User-Agent.
-	c, err := storage.NewClient(ctx, option.WithHTTPClient(useragent.HTTPClient(&client.Client, "blob")))
+	c, err := storage.NewClient(ctx, clientOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -256,10 +362,14 @@ func (b *bucket) ErrorCode(err error) gcerrors.ErrorCode {
 	}
 	if gerr, ok := err.(*googleapi.Error); ok {
 		switch gerr.Code {
+		case http.StatusForbidden:
+			return gcerrors.PermissionDenied
 		case http.StatusNotFound:
 			return gcerrors.NotFound
 		case http.StatusPreconditionFailed:
 			return gcerrors.FailedPrecondition
+		case http.StatusTooManyRequests:
+			return gcerrors.ResourceExhausted
 		}
 	}
 	return gcerrors.Unknown
@@ -304,12 +414,13 @@ func (b *bucket) ListPaged(ctx context.Context, opts *driver.ListOptions) (*driv
 	if len(objects) > 0 {
 		page.Objects = make([]*driver.ListObject, len(objects))
 		for i, obj := range objects {
-			asFunc := func(i interface{}) bool {
-				p, ok := i.(*storage.ObjectAttrs)
+			toCopy := obj
+			asFunc := func(val interface{}) bool {
+				p, ok := val.(*storage.ObjectAttrs)
 				if !ok {
 					return false
 				}
-				*p = *obj
+				*p = *toCopy
 				return true
 			}
 			if obj.Prefix == "" {
@@ -417,6 +528,9 @@ func (b *bucket) NewRangeReader(ctx context.Context, key string, offset, length 
 				if !madeReader {
 					r, rerr = makeReader()
 					madeReader = true
+					if r == nil {
+						return false
+					}
 				}
 				*p = r
 				return true
@@ -572,16 +686,31 @@ func (b *bucket) Delete(ctx context.Context, key string) error {
 }
 
 func (b *bucket) SignedURL(ctx context.Context, key string, dopts *driver.SignedURLOptions) (string, error) {
-	if b.opts.GoogleAccessID == "" || (b.opts.PrivateKey == nil && b.opts.SignBytes == nil) {
-		return "", errors.New("to use SignedURL, you must call OpenBucket with a valid Options.GoogleAccessID and exactly one of Options.PrivateKey or Options.SignBytes")
+	numSigners := 0
+	if b.opts.PrivateKey != nil {
+		numSigners++
 	}
+	if b.opts.SignBytes != nil {
+		numSigners++
+	}
+	if b.opts.MakeSignBytes != nil {
+		numSigners++
+	}
+	if b.opts.GoogleAccessID == "" || numSigners != 1 {
+		return "", errors.New("to use SignedURL, you must call OpenBucket with a valid Options.GoogleAccessID and exactly one of Options.PrivateKey, Options.SignBytes, or Options.MakeSignBytes")
+	}
+
 	key = escapeKey(key)
 	opts := &storage.SignedURLOptions{
 		Expires:        time.Now().Add(dopts.Expiry),
 		Method:         dopts.Method,
+		ContentType:    dopts.ContentType,
 		GoogleAccessID: b.opts.GoogleAccessID,
 		PrivateKey:     b.opts.PrivateKey,
 		SignBytes:      b.opts.SignBytes,
+	}
+	if b.opts.MakeSignBytes != nil {
+		opts.SignBytes = b.opts.MakeSignBytes(ctx)
 	}
 	return storage.SignedURL(b.name, key, opts)
 }
