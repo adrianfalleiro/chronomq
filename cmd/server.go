@@ -3,6 +3,7 @@ package cmd
 import (
 	"errors"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/rs/zerolog/log"
 	"github.com/spf13/cobra"
+	"google.golang.org/grpc"
 
 	"github.com/chronomq/chronomq/pkg/chronomq"
 	"github.com/chronomq/chronomq/pkg/persistence"
@@ -129,6 +131,12 @@ func startApp(cfg *config) {
 	go func() {
 		rpcSRV, _ = protocol.ServeRPC(h, cfg.addrs.rpcAddr)
 	}()
+	var grpcSrv *grpc.Server
+	var lis net.Listener
+	go func() {
+		// Start the grpc server
+		grpcSrv, lis, _ = protocol.ServeGRPC(h, cfg.addrs.grpcAddr)
+	}()
 
 	sigc := make(chan os.Signal, 1)
 	signal.Notify(sigc, syscall.SIGUSR1)
@@ -140,6 +148,11 @@ func startApp(cfg *config) {
 		log.Info().Msg("Stopping rpc protocol server")
 		rpcSRV.Close()
 		log.Info().Msg("Stopping rpc protocol server - Done")
+
+		log.Info().Msg("Shutting down gRPC server...")
+		grpcSrv.GracefulStop()
+		lis.Close()
+		log.Info().Msg("gRPC server stopped.")
 		h.Stop(true)
 	}()
 

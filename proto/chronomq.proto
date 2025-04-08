@@ -1,0 +1,54 @@
+syntax = "proto3";
+
+package chronomq;
+option go_package = "github.com/chronomq/chronomq/api/grpc/chronomq";
+
+// Job message matches the net/rpc Job
+message Job {
+  string id = 1;
+  int64 delay_millis = 2; // Delay in milliseconds
+  bytes body = 3;
+}
+
+message PutWithIDRequest {
+  Job job = 1;
+}
+
+message PutWithIDResponse {
+  string id = 1;
+}
+
+message CancelRequest {
+  string id = 1;
+}
+
+message CancelResponse {}
+
+message NextRequest {
+  int64 timeout_millis = 1;
+}
+
+message NextResponse {
+  Job job = 1;
+}
+
+message PingRequest {}
+message PingResponse {
+  string pong = 1;
+}
+
+message InspectNRequest {
+  int32 n = 1;
+}
+
+message InspectNResponse {
+  repeated Job jobs = 1;
+}
+
+service ChronoMQ {
+  rpc PutWithID(PutWithIDRequest) returns (PutWithIDResponse);
+  rpc Cancel(CancelRequest) returns (CancelResponse);
+  rpc Next(NextRequest) returns (NextResponse);
+  rpc Ping(PingRequest) returns (PingResponse);
+  rpc InspectN(InspectNRequest) returns (InspectNResponse);
+}
