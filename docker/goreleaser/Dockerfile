@@ -8,7 +8,7 @@ FROM scratch as binBase
 COPY chronomq /
 
 FROM alpine:edge
-LABEL maintainer="Urjit Singh Bhatia<(urjitsinghbhatia@gmail.com> (github: @chronomq)"
+LABEL maintainer="Adrian Falleiro<(afalleiro@gmail.com> (github: @adrianfalleiro)"
 
 ARG CHRONOMQ_VERSION=0.1.0
 
