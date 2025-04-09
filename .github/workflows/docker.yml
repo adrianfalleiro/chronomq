@@ -2,10 +2,8 @@ name: Build, Test and Publish Docker Image
 
 on:
   push:
-    branches: [main, master]
-    tags: ["v*"]
-  pull_request:
-    branches: [main, master]
+    tags:
+      - "v*" # e.g. v2.1.0
 
 env:
   REGISTRY: ghcr.io
@@ -37,11 +35,12 @@ jobs:
           make test
 
       - name: Build binary
-        run: CGO_ENABLED=0 GOOS=linux go build -o chronomq .
+        run: |
+          CGO_ENABLED=0 GOOS=linux go build -o chronomq .
 
       # Set up Docker buildx
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v2
+        uses: docker/setup-buildx-action@v3
 
       # Login to GitHub Container Registry
       - name: Log in to the Container registry
@@ -77,3 +76,4 @@ jobs:
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+          platform: linux/amd64
