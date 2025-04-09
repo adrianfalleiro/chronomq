@@ -31,7 +31,7 @@ jobs:
 
       - name: Run tests
         run: |
-          go install
+          go install github.com/onsi/ginkgo
           make test
 
       - name: Build binary
