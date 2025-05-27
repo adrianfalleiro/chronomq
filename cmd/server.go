@@ -139,7 +139,7 @@ func startApp(cfg *config) {
 	}()
 
 	sigc := make(chan os.Signal, 1)
-	signal.Notify(sigc, syscall.SIGUSR1)
+	signal.Notify(sigc, syscall.SIGUSR1, syscall.SIGTERM)
 
 	wg.Add(1)
 	go func() {

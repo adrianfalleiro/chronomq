@@ -90,7 +90,7 @@ In other words, Chronomq orders a stream of jobs by their `trigger` time.
 
 ### Operation Mode: Server
 
-Runs Chronomq queue server. If `restore` is used, the server first attempts to restore jobs from the give snapshot location and then starts serving the queue. If the server receives a `SIGUSR1`, it exits gracefully by creating a new snapshot with any jobs that were held in memory at shutdown time.
+Runs Chronomq queue server. If `restore` is used, the server first attempts to restore jobs from the give snapshot location and then starts serving the queue. If the server receives a `SIGUSR1` or `SIGTERM`, it exits gracefully by creating a new snapshot with any jobs that were held in memory at shutdown time.
 The snapshots can be copied to different machines and supplied to new server instances.
 
 1. Restore jobs from a snapshot `--restore`
