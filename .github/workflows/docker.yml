@@ -1,6 +1,7 @@
 name: Build, Test and Publish Docker Image
 
 on:
+  workflow_dispatch:
   push:
     tags:
       - "v*" # e.g. v2.1.0
