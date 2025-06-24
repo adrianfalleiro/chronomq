@@ -67,12 +67,11 @@ func (pq *PriorityQueue) Pop() interface{} {
 	old := *pq
 	n := len(old) - 1
 	item := old[n]
-	old = append(old[:n], old[n+1:]...)
-	old[:n+1][n] = nil
+	old[n] = nil // clear reference for GC
+	*pq = old[:n] // simply truncate, no append needed
 
 	item.index = -1 // for safety
 
-	*pq = old
 	return item
 }
 
