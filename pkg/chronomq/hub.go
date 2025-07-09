@@ -123,15 +123,23 @@ func (h *Hub) CancelJobLocked(jobID string) (*Job, error) {
 	h.lock.Lock()
 	defer h.lock.Unlock()
 	if !h.jobFilter.Lookup(id) {
-		// no such job
+		// no such job (filter can have false positives but not false negatives)
 		go metrics.Incr("hub.cancel.ok")
+		go metrics.Incr("hub.cancel.notfound")
 		return nil, nil
 	}
 	j, err := h.cancelJob(jobID)
 	if err == nil {
+		// delete from hub was successful
+		// remove from cuckoo filter (might not be present but we don't care either way)
 		if !h.jobFilter.Delete(id) {
+			go metrics.Incr("hub.cancel.should_be_unreachable")
 		}
+	} else {
+		// job not found
+		go metrics.Incr("hub.cancel.notfound")
 	}
+
 	return j, err
 }
 
