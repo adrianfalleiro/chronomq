@@ -60,7 +60,7 @@ func (idx *JobIndex) AsTemporalState() temporal.State {
 	case idx.triggerAt.After(now):
 		return temporal.Future
 	default:
-		return temporal.Past
+		return temporal.Current
 	}
 }
 

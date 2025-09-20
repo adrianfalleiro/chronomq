@@ -15,7 +15,7 @@ import (
 
 var _ = Describe("Indexed Storage", func() {
 	var tempDir string
-	var diskStore persistence.DiskJobStore
+	var diskStore *persistence.DiskJobStore
 	var hub *Hub
 
 	BeforeEach(func() {
@@ -23,7 +23,7 @@ var _ = Describe("Indexed Storage", func() {
 		var err error
 		tempDir, err = ioutil.TempDir("", "indexed-storage-test-")
 		Expect(err).To(BeNil())
-		diskStore = persistence.NewSimpleDiskJobStore(tempDir)
+		diskStore = persistence.NewDiskJobStore(tempDir)
 
 		// Create hub with indexed storage
 		opts := &HubOpts{

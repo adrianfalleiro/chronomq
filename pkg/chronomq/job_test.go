@@ -2,6 +2,7 @@ package chronomq_test
 
 import (
 	"container/heap"
+	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -65,16 +66,34 @@ var _ = Describe("Test jobs", func() {
 			Expect(j.TriggerAt().Unix()).To(Equal(jj.TriggerAt().Unix()))
 		})
 
-		It("use a persister to save a job", func() {
+		It("use disk store to save a job", func() {
 			j := NewJobAutoID(time.Now(), []byte("This is a test job"))
-			store, err := persistence.InMemStorage()
-			Expect(err).NotTo(HaveOccurred())
-			p := persistence.NewJournalPersister(store)
-			defer p.Finalize()
-			Expect(p.ResetDataDir()).To(BeNil())
+			tempDir := "/tmp/chronomq-job-test"
+			os.RemoveAll(tempDir)
+			os.MkdirAll(tempDir, 0755)
+			defer os.RemoveAll(tempDir)
 
-			err = p.Persist(j)
+			diskStore := persistence.NewDiskJobStore(tempDir)
+			defer diskStore.Close()
+
+			key, err := diskStore.StoreJob(j)
 			Expect(err).NotTo(HaveOccurred())
+			Expect(key).NotTo(BeEmpty())
+
+			// Verify we can retrieve the job
+			retrievedData, err := diskStore.RetrieveJob(key)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(retrievedData).NotTo(BeNil())
+
+			// Decode the job data
+			data, ok := retrievedData.([]byte)
+			Expect(ok).To(BeTrue())
+
+			var job Job
+			err = job.GobDecode(data)
+			Expect(err).NotTo(HaveOccurred())
+			Expect(job.ID()).To(Equal(j.ID()))
+			Expect(job.Body()).To(Equal(j.Body()))
 		})
 	})
 })

@@ -14,7 +14,7 @@ import (
 	"github.com/chronomq/chronomq/pkg/persistence"
 )
 
-var diskStore persistence.DiskJobStore
+var diskStore *persistence.DiskJobStore
 var tempDir string
 
 var _ = Describe("Test hub", func() {
@@ -25,7 +25,7 @@ var _ = Describe("Test hub", func() {
 		var err error
 		tempDir, err = ioutil.TempDir("", "chronomq-test-")
 		Expect(err).To(BeNil())
-		diskStore = persistence.NewSimpleDiskJobStore(tempDir)
+		diskStore = persistence.NewDiskJobStore(tempDir)
 	})
 
 	AfterEach(func() {
@@ -48,7 +48,7 @@ var _ = Describe("Test hub", func() {
 			// Create unique temp directory for this iteration
 			iterTempDir, err := ioutil.TempDir("", "chronomq-iter-test-")
 			Expect(err).To(BeNil())
-			iterDiskStore := persistence.NewSimpleDiskJobStore(iterTempDir)
+			iterDiskStore := persistence.NewDiskJobStore(iterTempDir)
 
 			h := NewHub(&HubOpts{
 				SpokeSpan:      time.Second * time.Duration(rand.Intn(2999)+1),

@@ -29,7 +29,7 @@ func benchCancels(b *testing.B, jobCount int) {
 		b.StopTimer()
 		// Create temporary disk store for benchmark
 		tempDir, _ := ioutil.TempDir("", "bench-")
-		diskStore := persistence.NewSimpleDiskJobStore(tempDir)
+		diskStore := persistence.NewDiskJobStore(tempDir)
 		var s = chronomq.NewSpoke(time.Now(), time.Now().Add(time.Hour*10), diskStore)
 		for i := 0; i < jobCount; i++ {
 			s.AddJobLocked(jobs[i])

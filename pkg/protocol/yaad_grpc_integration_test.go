@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -29,13 +30,16 @@ var _ = Describe("Test grpc protocol:", func() {
 
 	BeforeEach(func(done Done) {
 		defer close(done)
-		store, err := persistence.InMemStorage()
-		Expect(err).NotTo(HaveOccurred())
+		tempDir := "/tmp/chronomq-grpc-test"
+		os.RemoveAll(tempDir)
+		os.MkdirAll(tempDir, 0755)
+		diskStore := persistence.NewDiskJobStore(tempDir)
 		var opts = chronomq.HubOpts{
 			AttemptRestore: false,
-			Persister:      persistence.NewJournalPersister(store),
+			DiskStore:      diskStore,
 			SpokeSpan:      time.Second * 5}
 		h = chronomq.NewHub(&opts)
+		var err error
 		srv, lis, err = protocol.ServeGRPC(h, ":0")
 		Expect(err).NotTo(HaveOccurred())
 		port++
@@ -44,6 +48,7 @@ var _ = Describe("Test grpc protocol:", func() {
 		Eventually(func() error {
 			var opts []grpc.DialOption
 			opts = append(opts, grpc.WithTransportCredentials(insecure.NewCredentials()))
+			var err error
 			conn, err = grpc.NewClient(lis.Addr().String(), opts...)
 			if err != nil {
 				return err

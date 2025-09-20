@@ -2,7 +2,9 @@ package chronomq
 
 import (
 	"container/heap"
+	"context"
 	"fmt"
+	"runtime"
 	"sync"
 	"time"
 
@@ -33,7 +35,7 @@ var (
 type HubOpts struct {
 	AttemptRestore bool                      // If true, hub will try to restore from disk on start
 	SpokeSpan      time.Duration             // How wide should the spokes be
-	DiskStore      persistence.DiskJobStore  // Disk storage for jobs
+	DiskStore      persistence.DiskJobStoreInterface  // Disk storage for jobs
 	MaxCFSize      uint                      // Max size of the Cuckoo Filter
 }
 
@@ -43,7 +45,7 @@ type Hub struct {
 	spokeSpan time.Duration                        // How much time does a spoke span
 	spokeMap  map[temporal.Bound]*Spoke     // Quick lookup map for spokes
 	spokes    *queue.PriorityQueue         // Actual spokes sorted by time
-	diskStore persistence.DiskJobStore     // Disk storage for full job data
+	diskStore persistence.DiskJobStoreInterface     // Disk storage for full job data
 
 	pastSpoke    *Spoke // Permanently pinned to the past
 	currentSpoke *Spoke // The current spoke - started in the past or now, ends in the future or now
@@ -51,6 +53,8 @@ type Hub struct {
 	stats *stats.Counters
 	lock  *sync.Mutex
 
+	ctx    context.Context
+	cancel context.CancelFunc
 }
 
 // NewHub creates a new hub where adjacent spokes lie at the given
@@ -61,6 +65,7 @@ func NewHub(opts *HubOpts) *Hub {
 		maxCFSize = opts.MaxCFSize
 	}
 
+	ctx, cancel := context.WithCancel(context.Background())
 	h := &Hub{
 		jobFilter:    cuckoo.NewFilter(maxCFSize),
 		spokeSpan:    opts.SpokeSpan,
@@ -71,7 +76,12 @@ func NewHub(opts *HubOpts) *Hub {
 		currentSpoke: nil,
 		stats:        &stats.Counters{},
 		lock:         &sync.Mutex{},
+		ctx:          ctx,
+		cancel:       cancel,
 	}
+
+	// Set finalizer to ensure cleanup if Stop() is not called
+	runtime.SetFinalizer(h, (*Hub).finalizeHub)
 	heap.Init(h.spokes)
 
 	log.Info().Dur("spokeSpan", opts.SpokeSpan).
@@ -97,12 +107,27 @@ func NewHub(opts *HubOpts) *Hub {
 
 // Stop the hub gracefully
 func (h *Hub) Stop(persist bool) {
+	// Cancel context to stop goroutines
+	if h.cancel != nil {
+		h.cancel()
+	}
+
 	// Close disk store
 	if err := h.diskStore.Close(); err != nil {
 		log.Error().Err(err).Msg("Hub:Stop Error closing disk store")
 	}
 
+	// Clear finalizer since we're cleaning up manually
+	runtime.SetFinalizer(h, nil)
+
 	log.Info().Msg("Hub:Stop stopped")
+}
+
+// finalizeHub is called by the garbage collector if Stop() was not called
+func (h *Hub) finalizeHub() {
+	if h.cancel != nil {
+		h.cancel()
+	}
 }
 
 // Stats returns a snapshot of the current hub's stats
@@ -425,8 +450,14 @@ func (h *Hub) StatusLocked() {
 // StatusPrinter starts a status printer that prints hub stats over some time interval
 func (h *Hub) StatusPrinter() {
 	t := time.NewTicker(time.Second * 10)
-	for range t.C {
-		h.StatusLocked()
+	defer t.Stop()
+	for {
+		select {
+		case <-h.ctx.Done():
+			return
+		case <-t.C:
+			h.StatusLocked()
+		}
 	}
 }
 

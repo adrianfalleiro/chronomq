@@ -22,7 +22,7 @@ type Spoke struct {
 	temporal.Bound
 	indexMap   map[string]*queue.Item // Maps job ID to queue item containing JobIndex
 	indexQueue queue.PriorityQueue    // Orders the job indices by trigger priority
-	diskStore  persistence.DiskJobStore
+	diskStore  persistence.DiskJobStoreInterface
 
 	lock *sync.Mutex
 }
@@ -32,7 +32,7 @@ type Spoke struct {
 var ErrJobIndexOutOfSpokeBounds = errors.New("The offered job is outside the bounds of this spoke")
 
 // NewSpoke creates a new spoke
-func NewSpoke(start, end time.Time, diskStore persistence.DiskJobStore) *Spoke {
+func NewSpoke(start, end time.Time, diskStore persistence.DiskJobStoreInterface) *Spoke {
 	iq := queue.PriorityQueue{}
 	heap.Init(&iq)
 	return &Spoke{

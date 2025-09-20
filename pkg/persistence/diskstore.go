@@ -1,14 +1,15 @@
 package persistence
 
 import (
-	"encoding/gob"
 	"fmt"
-	"io"
+	"os"
+	"path/filepath"
+	"strings"
 	"sync"
+	"time"
 )
 
-// DiskJobStore provides disk-based storage for individual jobs
-type DiskJobStore interface {
+type DiskJobStoreInterface interface {
 	// StoreJob stores a job on disk and returns a key to retrieve it
 	StoreJob(job interface{}) (string, error)
 
@@ -22,32 +23,108 @@ type DiskJobStore interface {
 	Close() error
 }
 
-// FileDiskJobStore implements DiskJobStore using file-based storage
-type FileDiskJobStore struct {
-	storage Storage
-	lock    *sync.RWMutex
-	jobs    map[string][]byte // In-memory cache for quick access
-	nextKey int64             // Simple key generator
+// gobEncoder interface for objects that can be gob-encoded
+type gobEncoder interface {
+	GobEncode() ([]byte, error)
 }
 
-// NewFileDiskJobStore creates a new file-based disk job store
-func NewFileDiskJobStore(storage Storage) *FileDiskJobStore {
-	return &FileDiskJobStore{
-		storage: storage,
-		lock:    &sync.RWMutex{},
-		jobs:    make(map[string][]byte),
-		nextKey: 1,
+// DiskJobStore implements disk-based job storage using direct file system operations
+// This provides clear visibility of job persistence to disk
+type DiskJobStore struct {
+	basePath string
+	nextKey  int64
+	lock     *sync.RWMutex
+}
+
+// NewDiskJobStore creates a new disk job store that writes individual files
+func NewDiskJobStore(basePath string) *DiskJobStore {
+	// Ensure directory exists
+	os.MkdirAll(basePath, 0755)
+
+	return &DiskJobStore{
+		basePath: basePath,
+		nextKey:  1,
+		lock:     &sync.RWMutex{},
 	}
 }
 
-// StoreJob stores a job on disk and returns a key to retrieve it
-func (fds *FileDiskJobStore) StoreJob(job interface{}) (string, error) {
-	fds.lock.Lock()
-	defer fds.lock.Unlock()
+// getJobPath returns a date-based hierarchical path for the job file
+// Creates path like: basePath/2025/01/15/14/job_id.job (YYYY/MM/DD/HH/)
+func (sds *DiskJobStore) getJobPath(job interface{}, jobID string) string {
+	// Try to get trigger time from job for date-based structure
+	if jobWithTrigger, ok := job.(interface{ TriggerAt() time.Time }); ok {
+		triggerTime := jobWithTrigger.TriggerAt()
 
-	// Generate unique key
-	key := fmt.Sprintf("job_%d", fds.nextKey)
-	fds.nextKey++
+		// Create date-based path: YYYY/MM/DD/HH/
+		year := fmt.Sprintf("%04d", triggerTime.Year())
+		month := fmt.Sprintf("%02d", int(triggerTime.Month()))
+		day := fmt.Sprintf("%02d", triggerTime.Day())
+		hour := fmt.Sprintf("%02d", triggerTime.Hour())
+
+		dirPath := filepath.Join(sds.basePath, year, month, day, hour)
+
+		// Ensure subdirectories exist
+		os.MkdirAll(dirPath, 0755)
+
+		return filepath.Join(dirPath, jobID+".job")
+	}
+
+	// Fallback for jobs without trigger time - use current time
+	now := time.Now()
+	year := fmt.Sprintf("%04d", now.Year())
+	month := fmt.Sprintf("%02d", int(now.Month()))
+	day := fmt.Sprintf("%02d", now.Day())
+	hour := fmt.Sprintf("%02d", now.Hour())
+
+	dirPath := filepath.Join(sds.basePath, year, month, day, hour)
+	os.MkdirAll(dirPath, 0755)
+
+	return filepath.Join(dirPath, jobID+".job")
+}
+
+// findJobFile searches for a job file by ID within the hierarchical structure
+func (sds *DiskJobStore) findJobFile(jobID string) (string, error) {
+	var foundPath string
+
+	err := filepath.Walk(sds.basePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Check if this is the job file we're looking for
+		if !info.IsDir() && info.Name() == jobID+".job" {
+			foundPath = path
+			return fmt.Errorf("found") // Use error to stop walking
+		}
+
+		return nil
+	})
+
+	if err != nil && err.Error() != "found" {
+		return "", err
+	}
+
+	if foundPath == "" {
+		return "", fmt.Errorf("job file not found: %s", jobID)
+	}
+
+	return foundPath, nil
+}
+
+// StoreJob stores a job on disk using the job's ID as the key
+func (sds *DiskJobStore) StoreJob(job interface{}) (string, error) {
+	sds.lock.Lock()
+	defer sds.lock.Unlock()
+
+	// Extract job ID to use as disk key
+	var jobID string
+	if jobWithID, ok := job.(interface{ ID() string }); ok {
+		jobID = jobWithID.ID()
+	} else {
+		// Fallback to generated key if job doesn't have ID method
+		jobID = fmt.Sprintf("job_%d", sds.nextKey)
+		sds.nextKey++
+	}
 
 	// Encode job using gob
 	if gobEncodable, ok := job.(gobEncoder); ok {
@@ -56,141 +133,107 @@ func (fds *FileDiskJobStore) StoreJob(job interface{}) (string, error) {
 			return "", fmt.Errorf("failed to encode job: %w", err)
 		}
 
-		// Store in memory cache
-		fds.jobs[key] = data
-
-		// Immediately persist to actual storage
-		err = fds.persistSingleJob(key, data)
+		// Write to date-based hierarchical file path
+		filePath := sds.getJobPath(job, jobID)
+		err = os.WriteFile(filePath, data, 0644)
 		if err != nil {
-			// Remove from cache if disk write failed
-			delete(fds.jobs, key)
-			return "", fmt.Errorf("failed to persist job to storage: %w", err)
+			return "", fmt.Errorf("failed to write job file: %w", err)
 		}
 
-		return key, nil
+		return jobID, nil
 	}
 
 	return "", fmt.Errorf("job does not implement gob encoding")
 }
 
 // RetrieveJob retrieves a job from disk using its key
-func (fds *FileDiskJobStore) RetrieveJob(key string) (interface{}, error) {
-	fds.lock.RLock()
-	defer fds.lock.RUnlock()
+func (sds *DiskJobStore) RetrieveJob(key string) (interface{}, error) {
+	sds.lock.RLock()
+	defer sds.lock.RUnlock()
 
-	data, exists := fds.jobs[key]
-	if !exists {
-		return nil, fmt.Errorf("job with key %s not found", key)
+	// Find the job file in the date-based hierarchy
+	filePath, err := sds.findJobFile(key)
+	if err != nil {
+		return nil, err
 	}
 
-	// Return the raw data - let the caller handle decoding
-	// This avoids circular import issues
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, fmt.Errorf("job with key %s not found", key)
+		}
+		return nil, fmt.Errorf("failed to read job file: %w", err)
+	}
+
+	// Return raw data - let the caller handle decoding
 	return data, nil
 }
 
 // DeleteJob removes a job from disk storage
-func (fds *FileDiskJobStore) DeleteJob(key string) error {
-	fds.lock.Lock()
-	defer fds.lock.Unlock()
+func (sds *DiskJobStore) DeleteJob(key string) error {
+	sds.lock.Lock()
+	defer sds.lock.Unlock()
 
-	// Remove from memory cache
-	delete(fds.jobs, key)
+	// Find and delete the job file from the date-based hierarchy
+	filePath, err := sds.findJobFile(key)
+	if err != nil {
+		// If file doesn't exist, that's fine for delete operation
+		if strings.Contains(err.Error(), "not found") {
+			return nil
+		}
+		return err
+	}
 
-	// Remove from disk storage
-	return fds.deleteSingleJob(key)
+	err = os.Remove(filePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("failed to delete job file: %w", err)
+	}
+
+	return nil
 }
 
 // Close closes the disk store and releases resources
-func (fds *FileDiskJobStore) Close() error {
-	fds.lock.Lock()
-	defer fds.lock.Unlock()
-
-	// Clear the cache
-	fds.jobs = nil
+func (sds *DiskJobStore) Close() error {
+	// Nothing to clean up for simple file store
 	return nil
 }
 
-// persistToStorage persists all cached jobs to the underlying storage
-// This would typically be called periodically or on shutdown
-func (fds *FileDiskJobStore) persistToStorage() error {
-	fds.lock.RLock()
-	defer fds.lock.RUnlock()
-
-	writer, err := fds.storage.Writer()
-	if err != nil {
-		return fmt.Errorf("failed to create storage writer: %w", err)
-	}
-	defer writer.Close()
-
-	encoder := gob.NewEncoder(writer)
-
-	// Write all jobs to storage
-	for key, data := range fds.jobs {
-		entry := diskEntry{Key: key, Data: data}
-		if err := encoder.Encode(entry); err != nil {
-			return fmt.Errorf("failed to encode entry %s: %w", key, err)
-		}
-	}
-
-	return nil
+// GetStoredJobCount returns the number of job files currently on disk
+func (sds *DiskJobStore) GetStoredJobCount() (int, error) {
+	count := 0
+	err := sds.WalkJobFiles(func(key string) error {
+		count++
+		return nil
+	})
+	return count, err
 }
 
-// loadFromStorage loads jobs from the underlying storage
-func (fds *FileDiskJobStore) loadFromStorage() error {
-	reader, err := fds.storage.Reader()
-	if err != nil {
-		return fmt.Errorf("failed to create storage reader: %w", err)
-	}
-	defer reader.Close()
+// GetAllJobKeys returns all job IDs currently stored on disk
+func (sds *DiskJobStore) GetAllJobKeys() ([]string, error) {
+	var keys []string
+	err := sds.WalkJobFiles(func(key string) error {
+		keys = append(keys, key)
+		return nil
+	})
+	return keys, err
+}
 
-	decoder := gob.NewDecoder(reader)
-	fds.jobs = make(map[string][]byte)
-
-	for {
-		var entry diskEntry
-		err := decoder.Decode(&entry)
-		if err == io.EOF {
-			break
-		}
+// WalkJobFiles efficiently walks through all job files in the hierarchical structure
+func (sds *DiskJobStore) WalkJobFiles(fn func(string) error) error {
+	return filepath.Walk(sds.basePath, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
-			return fmt.Errorf("failed to decode entry: %w", err)
+			return err
 		}
 
-		fds.jobs[entry.Key] = entry.Data
-	}
+		// Skip directories and non-job files
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".job") {
+			return nil
+		}
 
-	return nil
-}
+		// Extract job ID from filename (remove .job extension)
+		filename := info.Name()
+		key := filename[:len(filename)-4]
 
-// diskEntry represents a key-value pair stored on disk
-type diskEntry struct {
-	Key  string
-	Data []byte
-}
-
-// gobEncoder interface for objects that can be gob-encoded
-type gobEncoder interface {
-	GobEncode() ([]byte, error)
-}
-
-// persistSingleJob writes a single job to disk storage
-func (fds *FileDiskJobStore) persistSingleJob(key string, data []byte) error {
-	// For now, we'll batch persist jobs periodically rather than one-by-one
-	// This is more efficient for the storage backend and matches the existing
-	// ChronoMQ persistence model
-
-	// The job is already in memory cache, so it's "persisted" from the perspective
-	// of not losing it immediately. The actual disk persistence happens during
-	// shutdown or explicit persistence calls via persistToStorage()
-
-	return nil
-}
-
-// deleteSingleJob removes a single job from disk storage
-func (fds *FileDiskJobStore) deleteSingleJob(key string) error {
-	// For file-based storage, we would need to implement file deletion
-	// For now, this is a no-op since the underlying storage abstraction
-	// doesn't provide a delete API
-	// TODO: Implement proper file deletion when storage interface supports it
-	return nil
+		return fn(key)
+	})
 }

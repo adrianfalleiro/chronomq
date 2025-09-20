@@ -18,14 +18,14 @@ import (
 
 var _ = Describe("Test spokes", func() {
 	var tempDir string
-	var diskStore persistence.DiskJobStore
+	var diskStore *persistence.DiskJobStore
 
 	BeforeEach(func() {
 		// Create temporary directory for each test
 		var err error
 		tempDir, err = ioutil.TempDir("", "spoke-test-")
 		Expect(err).To(BeNil())
-		diskStore = persistence.NewSimpleDiskJobStore(tempDir)
+		diskStore = persistence.NewDiskJobStore(tempDir)
 	})
 
 	AfterEach(func() {

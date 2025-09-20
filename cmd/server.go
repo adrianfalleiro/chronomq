@@ -67,7 +67,7 @@ func startApp(cfg *config) {
 		log.Info().Msg("Applying default GC tuning")
 		debug.SetGCPercent(5)
 	} else {
-		log.Info().Str("GCPercent", os.Getenv("GOGC")).Msg("Using custom GC tuning")
+		log.Info().Str("GCPercent", os.Getenv("GOGC")).Msg("Using custom GC tuning")
 	}
 	go func() {
 		err := http.ListenAndServe(":6060", nil)
@@ -80,7 +80,7 @@ func startApp(cfg *config) {
 
 	// Create disk storage for job data using simple file-based approach
 	jobsDir := filepath.Join(cfg.jobsDir, "jobs")
-	diskStore := persistence.NewSimpleDiskJobStore(jobsDir)
+	diskStore := persistence.NewDiskJobStore(jobsDir)
 
 	opts := &chronomq.HubOpts{
 		AttemptRestore: cfg.restore,

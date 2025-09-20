@@ -14,20 +14,20 @@ import (
 	"github.com/chronomq/chronomq/pkg/persistence"
 )
 
-var _ = Describe("SimpleDiskJobStore", func() {
+var _ = Describe("DiskJobStore", func() {
 	var tempDir string
-	var store persistence.DiskJobStore
+	var diskStore persistence.DiskJobStoreInterface
 
 	BeforeEach(func() {
 		var err error
 		tempDir, err = ioutil.TempDir("", "diskstore-test-")
 		Expect(err).To(BeNil())
-		store = persistence.NewSimpleDiskJobStore(tempDir)
+		diskStore = persistence.NewDiskJobStore(tempDir)
 	})
 
 	AfterEach(func() {
-		if store != nil {
-			store.Close()
+		if diskStore != nil {
+			diskStore.Close()
 		}
 		if tempDir != "" {
 			os.RemoveAll(tempDir)
@@ -35,17 +35,17 @@ var _ = Describe("SimpleDiskJobStore", func() {
 	})
 
 	Context("Basic Operations", func() {
-		It("should store and retrieve jobs", func() {
+		It("should diskStore and retrieve jobs", func() {
 			// Create a job
 			job := NewJobAutoID(time.Now().Add(time.Hour), []byte("test job data"))
 
 			// Store the job
-			key, err := store.StoreJob(job)
+			key, err := diskStore.StoreJob(job)
 			Expect(err).To(BeNil())
 			Expect(key).To(Equal(job.ID()))
 
 			// Retrieve the job
-			data, err := store.RetrieveJob(key)
+			data, err := diskStore.RetrieveJob(key)
 			Expect(err).To(BeNil())
 			Expect(data).ToNot(BeNil())
 
@@ -63,19 +63,19 @@ var _ = Describe("SimpleDiskJobStore", func() {
 		It("should delete jobs", func() {
 			// Store a job
 			job := NewJobAutoID(time.Now().Add(time.Hour), []byte("test job data"))
-			key, err := store.StoreJob(job)
+			key, err := diskStore.StoreJob(job)
 			Expect(err).To(BeNil())
 
 			// Verify it exists
-			_, err = store.RetrieveJob(key)
+			_, err = diskStore.RetrieveJob(key)
 			Expect(err).To(BeNil())
 
 			// Delete it
-			err = store.DeleteJob(key)
+			err = diskStore.DeleteJob(key)
 			Expect(err).To(BeNil())
 
 			// Should not be retrievable
-			_, err = store.RetrieveJob(key)
+			_, err = diskStore.RetrieveJob(key)
 			Expect(err).To(HaveOccurred())
 		})
 
@@ -85,7 +85,7 @@ var _ = Describe("SimpleDiskJobStore", func() {
 			job := NewJobAutoID(triggerTime, []byte("test"))
 
 			// Store the job
-			_, err := store.StoreJob(job)
+			_, err := diskStore.StoreJob(job)
 			Expect(err).To(BeNil())
 
 			// Check that directory structure was created
@@ -106,13 +106,13 @@ var _ = Describe("SimpleDiskJobStore", func() {
 			jobs := make([]*Job, 5)
 			for i := 0; i < 5; i++ {
 				jobs[i] = NewJobAutoID(time.Now().Add(time.Duration(i)*time.Hour), []byte("test"))
-				_, err := store.StoreJob(jobs[i])
+				_, err := diskStore.StoreJob(jobs[i])
 				Expect(err).To(BeNil())
 			}
 
 			// Walk through job files
 			foundKeys := make([]string, 0)
-			walkStore, ok := store.(interface {
+			walkStore, ok := diskStore.(interface {
 				WalkJobFiles(func(string) error) error
 			})
 			Expect(ok).To(BeTrue())
@@ -136,22 +136,22 @@ var _ = Describe("SimpleDiskJobStore", func() {
 	Context("Error Handling", func() {
 		It("should handle non-existent jobs gracefully", func() {
 			// Try to retrieve non-existent job
-			_, err := store.RetrieveJob("non-existent-job-id")
+			_, err := diskStore.RetrieveJob("non-existent-job-id")
 			Expect(err).To(HaveOccurred())
 		})
 
 		It("should handle deletion of non-existent jobs gracefully", func() {
 			// Try to delete non-existent job
-			err := store.DeleteJob("non-existent-job-id")
+			err := diskStore.DeleteJob("non-existent-job-id")
 			Expect(err).To(BeNil()) // Should not error - it's idempotent (deleting non-existent is fine)
 		})
 
 		It("should handle invalid job data gracefully", func() {
-			// This test verifies the store can handle edge cases
+			// This test verifies the diskStore can handle edge cases
 			// Create an invalid job (nil body should still work)
 			job := NewJobAutoID(time.Now().Add(time.Hour), nil)
 
-			_, err := store.StoreJob(job)
+			_, err := diskStore.StoreJob(job)
 			Expect(err).To(BeNil()) // Should not error even with nil body
 		})
 	})
@@ -167,11 +167,11 @@ var _ = Describe("SimpleDiskJobStore", func() {
 					defer func() { done <- true }()
 
 					job := NewJobAutoID(time.Now().Add(time.Duration(id)*time.Hour), []byte("concurrent test"))
-					key, err := store.StoreJob(job)
+					key, err := diskStore.StoreJob(job)
 					Expect(err).To(BeNil())
 
 					// Immediately try to retrieve it
-					_, err = store.RetrieveJob(key)
+					_, err = diskStore.RetrieveJob(key)
 					Expect(err).To(BeNil())
 				}(i)
 			}
