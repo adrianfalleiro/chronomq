@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime/debug"
 	"strings"
 	"sync"
@@ -118,14 +119,27 @@ func startApp(cfg *config) {
 		log.Fatal().Err(err).Msg("Cannot initialize storage")
 	}
 
-	opts := &chronomq.HubOpts{
+	// Create disk storage for job data using simple file-based approach
+	jobsDir := filepath.Join(cfg.storeCfg.Bucket.Path, "jobs")
+	diskStore := persistence.NewSimpleDiskJobStore(jobsDir)
+
+	opts := &chronomq.IndexedHubOpts{
 		AttemptRestore: cfg.restore,
 		SpokeSpan:      cfg.spokeSpan,
 		Persister:      persistence.NewJournalPersister(storage),
+		DiskStore:      diskStore,
 		MaxCFSize:      chronomq.DefaultMaxCFSize,
 	}
 
-	h := chronomq.NewHub(opts)
+	h := chronomq.NewIndexedHub(opts)
+
+	// Rebuild indices from disk if restore flag is set
+	if cfg.restore {
+		if err := h.RebuildIndicesFromDisk(); err != nil {
+			log.Fatal().Err(err).Msg("Failed to rebuild indices from disk")
+		}
+	}
+
 	var rpcSRV io.Closer
 	wg := sync.WaitGroup{}
 	go func() {

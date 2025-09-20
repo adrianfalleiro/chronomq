@@ -18,12 +18,12 @@ import (
 var ErrTimeout = errors.New("No new jobs available in given timeout")
 var memMonitor monitor.MemMonitor
 
-// RPCServer exposes a Chronomq hub backed RPC endpoint
+// RPCServer exposes a Chronomq indexed hub backed RPC endpoint
 type RPCServer struct {
-	hub *chronomq.Hub
+	hub *chronomq.IndexedHub
 }
 
-func newRPCServer(hub *chronomq.Hub) *RPCServer {
+func newRPCServer(hub *chronomq.IndexedHub) *RPCServer {
 	memMonitor = monitor.GetMemMonitor()
 	return &RPCServer{hub: hub}
 }
@@ -59,7 +59,12 @@ func (r *RPCServer) Cancel(id string, ignoredReply *int8) error {
 // for ready jobs. If no job is ready by the end of the timeout, ErrTimeout is returned
 func (r *RPCServer) Next(timeout time.Duration, job *api.Job) error {
 	// try once
-	if j := r.hub.NextLocked(); j != nil {
+	j, err := r.hub.NextLocked()
+	if err != nil {
+		log.Error().Err(err).Msg("Error retrieving job from indexed hub")
+		return err
+	}
+	if j != nil {
 		defer memMonitor.Decrement(j)
 		job.Body = j.Body()
 		job.ID = j.ID()
@@ -78,7 +83,12 @@ func (r *RPCServer) Next(timeout time.Duration, job *api.Job) error {
 		Time("waitTill", waitTill).
 		Msg("waiting for reserve")
 	for waitTill.After(time.Now()) {
-		if j := r.hub.NextLocked(); j != nil {
+		j, err := r.hub.NextLocked()
+		if err != nil {
+			log.Error().Err(err).Msg("Error retrieving job from indexed hub during wait")
+			return err
+		}
+		if j != nil {
 			defer memMonitor.Decrement(j)
 			job.Body = j.Body()
 			job.ID = j.ID()
@@ -104,22 +114,22 @@ func (r *RPCServer) InspectN(n int, rpcJobs *[]*api.Job) error {
 	if n == 0 {
 		return nil
 	}
-	log.Debug().Int("count", n).Msg("Returning jobs for inspection")
-	jobs := r.hub.GetNJobs(n)
+	log.Debug().Int("count", n).Msg("Returning job indices for inspection")
+	indices := r.hub.GetNJobIndices(n)
 
-	for j := range jobs {
+	for idx := range indices {
 		rpcJob := &api.Job{
-			Body:  j.Body(),
-			ID:    j.ID(),
-			Delay: j.TriggerAt().Sub(time.Now()),
+			Body:  nil, // Don't load full body for inspection
+			ID:    idx.ID(),
+			Delay: idx.TriggerAt().Sub(time.Now()),
 		}
 		*rpcJobs = append(*rpcJobs, rpcJob)
 	}
 	return nil
 }
 
-// ServeRPC starts serving hub over rpc
-func ServeRPC(hub *chronomq.Hub, addr string) (io.Closer, error) {
+// ServeRPC starts serving indexed hub over rpc
+func ServeRPC(hub *chronomq.IndexedHub, addr string) (io.Closer, error) {
 	srv := newRPCServer(hub)
 	rpcSrv := rpc.NewServer()
 	rpcSrv.Register(srv)

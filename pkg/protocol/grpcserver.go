@@ -15,10 +15,10 @@ import (
 
 type GRPCServer struct {
 	pb.UnimplementedChronoMQServer
-	hub *chronomq.Hub
+	hub *chronomq.IndexedHub
 }
 
-func newGRPCServer(hub *chronomq.Hub) *GRPCServer {
+func newGRPCServer(hub *chronomq.IndexedHub) *GRPCServer {
 	return &GRPCServer{hub: hub}
 }
 
@@ -45,7 +45,12 @@ func (s *GRPCServer) Cancel(ctx context.Context, req *pb.CancelRequest) (*pb.Can
 
 func (s *GRPCServer) Next(ctx context.Context, req *pb.NextRequest) (*pb.NextResponse, error) {
 	timeout := time.Millisecond * time.Duration(req.TimeoutMillis)
-	if j := s.hub.NextLocked(); j != nil {
+	j, err := s.hub.NextLocked()
+	if err != nil {
+		log.Error().Err(err).Msg("Error retrieving job from indexed hub")
+		return nil, err
+	}
+	if j != nil {
 		monitor.GetMemMonitor().Decrement(j)
 		return &pb.NextResponse{Job: toPBJob(j)}, nil
 	}
@@ -54,7 +59,12 @@ func (s *GRPCServer) Next(ctx context.Context, req *pb.NextRequest) (*pb.NextRes
 	}
 	waitUntil := time.Now().Add(timeout)
 	for time.Now().Before(waitUntil) {
-		if j := s.hub.NextLocked(); j != nil {
+		j, err := s.hub.NextLocked()
+		if err != nil {
+			log.Error().Err(err).Msg("Error retrieving job from indexed hub during wait")
+			return nil, err
+		}
+		if j != nil {
 			monitor.GetMemMonitor().Decrement(j)
 			return &pb.NextResponse{Job: toPBJob(j)}, nil
 		}
@@ -68,10 +78,17 @@ func (s *GRPCServer) Ping(ctx context.Context, _ *pb.PingRequest) (*pb.PingRespo
 }
 
 func (s *GRPCServer) InspectN(ctx context.Context, req *pb.InspectNRequest) (*pb.InspectNResponse, error) {
-	jobs := s.hub.GetNJobs(int(req.N))
+	// IndexedHub returns job indices, not full jobs
+	// For inspection, we'll return job metadata from indices
+	indices := s.hub.GetNJobIndices(int(req.N))
 	var resp []*pb.Job
-	for j := range jobs {
-		resp = append(resp, toPBJob(j))
+	for idx := range indices {
+		// Create a lightweight job representation from the index
+		resp = append(resp, &pb.Job{
+			Id:          idx.ID(),
+			Body:        nil, // Don't load full body for inspection
+			DelayMillis: int64(idx.TriggerAt().Sub(time.Now()).Milliseconds()),
+		})
 	}
 	return &pb.InspectNResponse{Jobs: resp}, nil
 }
@@ -84,8 +101,8 @@ func toPBJob(j *chronomq.Job) *pb.Job {
 	}
 }
 
-// ServeRPC starts serving hub over rpc
-func ServeGRPC(hub *chronomq.Hub, addr string) (*grpc.Server, net.Listener, error) {
+// ServeGRPC starts serving indexed hub over gRPC
+func ServeGRPC(hub *chronomq.IndexedHub, addr string) (*grpc.Server, net.Listener, error) {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, nil, err
