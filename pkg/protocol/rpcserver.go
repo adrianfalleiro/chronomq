@@ -20,10 +20,10 @@ var memMonitor monitor.MemMonitor
 
 // RPCServer exposes a Chronomq indexed hub backed RPC endpoint
 type RPCServer struct {
-	hub *chronomq.IndexedHub
+	hub *chronomq.Hub
 }
 
-func newRPCServer(hub *chronomq.IndexedHub) *RPCServer {
+func newRPCServer(hub *chronomq.Hub) *RPCServer {
 	memMonitor = monitor.GetMemMonitor()
 	return &RPCServer{hub: hub}
 }
@@ -129,7 +129,7 @@ func (r *RPCServer) InspectN(n int, rpcJobs *[]*api.Job) error {
 }
 
 // ServeRPC starts serving indexed hub over rpc
-func ServeRPC(hub *chronomq.IndexedHub, addr string) (io.Closer, error) {
+func ServeRPC(hub *chronomq.Hub, addr string) (io.Closer, error) {
 	srv := newRPCServer(hub)
 	rpcSrv := rpc.NewServer()
 	rpcSrv.Register(srv)

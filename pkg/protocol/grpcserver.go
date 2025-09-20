@@ -15,10 +15,10 @@ import (
 
 type GRPCServer struct {
 	pb.UnimplementedChronoMQServer
-	hub *chronomq.IndexedHub
+	hub *chronomq.Hub
 }
 
-func newGRPCServer(hub *chronomq.IndexedHub) *GRPCServer {
+func newGRPCServer(hub *chronomq.Hub) *GRPCServer {
 	return &GRPCServer{hub: hub}
 }
 
@@ -78,7 +78,7 @@ func (s *GRPCServer) Ping(ctx context.Context, _ *pb.PingRequest) (*pb.PingRespo
 }
 
 func (s *GRPCServer) InspectN(ctx context.Context, req *pb.InspectNRequest) (*pb.InspectNResponse, error) {
-	// IndexedHub returns job indices, not full jobs
+	// Hub returns job indices, not full jobs
 	// For inspection, we'll return job metadata from indices
 	indices := s.hub.GetNJobIndices(int(req.N))
 	var resp []*pb.Job
@@ -102,7 +102,7 @@ func toPBJob(j *chronomq.Job) *pb.Job {
 }
 
 // ServeGRPC starts serving indexed hub over gRPC
-func ServeGRPC(hub *chronomq.IndexedHub, addr string) (*grpc.Server, net.Listener, error) {
+func ServeGRPC(hub *chronomq.Hub, addr string) (*grpc.Server, net.Listener, error) {
 	lis, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, nil, err

@@ -4,10 +4,12 @@ import (
 	"fmt"
 	"io/ioutil"
 	"math/rand"
+	"os"
 	"testing"
 	"time"
 
 	"github.com/chronomq/chronomq/pkg/chronomq"
+	"github.com/chronomq/chronomq/pkg/persistence"
 	"github.com/rs/zerolog"
 	"github.com/rs/zerolog/log"
 )
@@ -25,7 +27,10 @@ func benchCancels(b *testing.B, jobCount int) {
 
 	for i := 0; i < b.N; i++ {
 		b.StopTimer()
-		var s = chronomq.NewSpoke(time.Now(), time.Now().Add(time.Hour*10))
+		// Create temporary disk store for benchmark
+		tempDir, _ := ioutil.TempDir("", "bench-")
+		diskStore := persistence.NewSimpleDiskJobStore(tempDir)
+		var s = chronomq.NewSpoke(time.Now(), time.Now().Add(time.Hour*10), diskStore)
 		for i := 0; i < jobCount; i++ {
 			s.AddJobLocked(jobs[i])
 		}
@@ -40,6 +45,10 @@ func benchCancels(b *testing.B, jobCount int) {
 			// cancel all of them randomly
 			s.CancelJobLocked(jobs[i].ID())
 		}
+		b.StopTimer()
+		// Clean up
+		diskStore.Close()
+		os.RemoveAll(tempDir)
 	}
 }
 
