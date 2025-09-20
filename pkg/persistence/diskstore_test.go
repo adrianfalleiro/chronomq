@@ -4,6 +4,7 @@ import (
 	"io/ioutil"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,9 @@ var _ = Describe("DiskJobStore", func() {
 			// Store the job
 			key, err := diskStore.StoreJob(job)
 			Expect(err).To(BeNil())
-			Expect(key).To(Equal(job.ID()))
+			// Key should be a file path, not just the job ID
+			Expect(key).To(ContainSubstring(job.ID()))
+			Expect(key).To(HaveSuffix(".job"))
 
 			// Retrieve the job
 			data, err := diskStore.RetrieveJob(key)
@@ -126,9 +129,21 @@ var _ = Describe("DiskJobStore", func() {
 			// Should have found all job keys
 			Expect(len(foundKeys)).To(Equal(5))
 
-			// Verify all job IDs are present
+			// Verify all job IDs are present (extract from file paths)
 			for _, job := range jobs {
-				Expect(foundKeys).To(ContainElement(job.ID()))
+				found := false
+				for _, key := range foundKeys {
+					// Extract job ID from file path (filename without .job extension)
+					filename := filepath.Base(key)
+					if strings.HasSuffix(filename, ".job") {
+						jobID := filename[:len(filename)-4]
+						if jobID == job.ID() {
+							found = true
+							break
+						}
+					}
+				}
+				Expect(found).To(BeTrue(), "Job ID %s should be found in walked files", job.ID())
 			}
 		})
 	})

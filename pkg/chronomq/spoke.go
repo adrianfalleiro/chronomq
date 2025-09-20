@@ -24,7 +24,7 @@ type Spoke struct {
 	indexQueue queue.PriorityQueue    // Orders the job indices by trigger priority
 	diskStore  persistence.DiskJobStoreInterface
 
-	lock *sync.Mutex
+	lock *sync.RWMutex
 }
 
 // ErrJobIndexOutOfSpokeBounds is returned when an attempt was made to add a job to a spoke that
@@ -41,7 +41,7 @@ func NewSpoke(start, end time.Time, diskStore persistence.DiskJobStoreInterface)
 		indexQueue: iq,
 		diskStore:  diskStore,
 		Bound:      temporal.NewBound(start, end),
-		lock:       &sync.Mutex{},
+		lock:       &sync.RWMutex{},
 	}
 }
 
@@ -102,14 +102,14 @@ func (s *Spoke) AddJobLocked(j *Job) error {
 		return ErrJobIndexOutOfSpokeBounds
 	}
 
-	// Store job on disk first (returns job ID as key)
-	_, err := s.diskStore.StoreJob(j)
+	// Store job on disk first (returns disk key)
+	diskKey, err := s.diskStore.StoreJob(j)
 	if err != nil {
 		return fmt.Errorf("failed to store job on disk: %w", err)
 	}
 
-	// Create index and add to memory structures (job ID is now the disk key)
-	idx := NewJobIndex(j)
+	// Create index with the disk key and add to memory structures
+	idx := NewJobIndex(j, diskKey)
 	item := idx.AsPriorityItem()
 	s.indexMap[idx.ID()] = item
 	heap.Push(&s.indexQueue, item)
@@ -174,7 +174,27 @@ func (s *Spoke) NextLocked() (*Job, error) {
 }
 
 // CancelJobLocked removes a job index and deletes the job from disk
+// Uses fast cancel by default (no job body loading) for better performance
 func (s *Spoke) CancelJobLocked(id string) (*Job, error) {
+	// Fast cancel by default - if job body is needed, use CancelJobWithBodyLocked
+	err := s.CancelJobFastLocked(id)
+	return nil, err
+}
+
+// CancelJobFastLocked removes a job index and deletes from disk without loading job body
+func (s *Spoke) CancelJobFastLocked(id string) error {
+	_, err := s.cancelJobLocked(id, false)
+	return err
+}
+
+// CancelJobWithBodyLocked removes a job index, deletes from disk, and returns the job body
+// Use this when you need access to the canceled job's data (slower due to disk I/O)
+func (s *Spoke) CancelJobWithBodyLocked(id string) (*Job, error) {
+	return s.cancelJobLocked(id, true)
+}
+
+// cancelJobLocked is the internal implementation with optional job loading
+func (s *Spoke) cancelJobLocked(id string, loadJob bool) (*Job, error) {
 	s.lock.Lock()
 	defer s.lock.Unlock()
 
@@ -185,10 +205,14 @@ func (s *Spoke) CancelJobLocked(id string) (*Job, error) {
 		delete(s.indexMap, id)
 		heap.Remove(&s.indexQueue, item.Index())
 
-		// Load job from disk before deleting it
-		job, err := s.retrieveJobFromDisk(idx.DiskKey())
-		if err != nil {
-			log.Warn().Err(err).Str("diskKey", idx.DiskKey()).Msg("Failed to retrieve job during cancellation")
+		var job *Job
+		if loadJob {
+			// Load job from disk before deleting it
+			var err error
+			job, err = s.retrieveJobFromDisk(idx.DiskKey())
+			if err != nil {
+				log.Warn().Err(err).Str("diskKey", idx.DiskKey()).Msg("Failed to retrieve job during cancellation")
+			}
 		}
 
 		// Delete from disk
@@ -206,6 +230,16 @@ func (s *Spoke) CancelJobLocked(id string) (*Job, error) {
 func (s *Spoke) OwnsJobLocked(id string) bool {
 	s.lock.Lock()
 	defer s.lock.Unlock()
+
+	_, ok := s.indexMap[id]
+	return ok
+}
+
+// OwnsJob returns true if a job by given id is owned by this spoke (without locking)
+// This is used for fast ownership checks during cancel operations
+func (s *Spoke) OwnsJob(id string) bool {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
 
 	_, ok := s.indexMap[id]
 	return ok

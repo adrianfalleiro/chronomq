@@ -225,8 +225,8 @@ var _ = Describe("Indexed Storage", func() {
 			// Verify job exists
 			Expect(hub.Stats().CurrentJobs).To(Equal(int64(1)))
 
-			// Cancel job
-			canceledJob, err := hub.CancelJobLocked(job.ID())
+			// Cancel job (with body to verify the job data)
+			canceledJob, err := hub.CancelJobWithBodyLocked(job.ID())
 			Expect(err).To(BeNil())
 			Expect(canceledJob).ToNot(BeNil())
 			Expect(canceledJob.ID()).To(Equal(job.ID()))

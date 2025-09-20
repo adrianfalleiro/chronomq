@@ -18,7 +18,7 @@ var _ = Describe("JobIndex", func() {
 		// Create a test job
 		triggerTime := time.Now().Add(time.Hour)
 		job = NewJobAutoID(triggerTime, []byte("test job data with some content"))
-		index = NewJobIndex(job)
+		index = NewJobIndex(job, job.ID())
 	})
 
 	Context("Creation", func() {
@@ -39,7 +39,7 @@ var _ = Describe("JobIndex", func() {
 		It("should be much smaller than original job", func() {
 			// For this test to be meaningful, the job should have a larger body
 			largeJob := NewJobAutoID(time.Now().Add(time.Hour), []byte("This is a much larger job body with significant content to test memory efficiency properly and ensure the index is actually smaller"))
-			largeIndex := NewJobIndex(largeJob)
+			largeIndex := NewJobIndex(largeJob, largeJob.ID())
 
 			// Calculate approximate memory usage of index
 			indexMemory := len(largeIndex.ID()) + len(largeIndex.DiskKey()) + 64 // rough estimate for other fields
@@ -59,7 +59,7 @@ var _ = Describe("JobIndex", func() {
 			}
 
 			largeJob := NewJobAutoID(time.Now().Add(time.Hour), largePayload)
-			largeIndex := NewJobIndex(largeJob)
+			largeIndex := NewJobIndex(largeJob, largeJob.ID())
 
 			// Index memory usage
 			indexMemory := len(largeIndex.ID()) + len(largeIndex.DiskKey()) + 64
@@ -74,19 +74,19 @@ var _ = Describe("JobIndex", func() {
 		It("should reflect job temporal state correctly", func() {
 			// Past job
 			pastJob := NewJobAutoID(time.Now().Add(-time.Hour), []byte("past"))
-			pastIndex := NewJobIndex(pastJob)
+			pastIndex := NewJobIndex(pastJob, pastJob.ID())
 			Expect(pastIndex.AsTemporalState()).To(Equal(temporal.Past))
 
 			// Current job (very close to now)
 			currentJob := NewJobAutoID(time.Now(), []byte("current"))
-			currentIndex := NewJobIndex(currentJob)
+			currentIndex := NewJobIndex(currentJob, currentJob.ID())
 			// Could be Past or Current depending on exact timing
 			state := currentIndex.AsTemporalState()
 			Expect(state == temporal.Past || state == temporal.Current).To(BeTrue())
 
 			// Future job
 			futureJob := NewJobAutoID(time.Now().Add(time.Hour), []byte("future"))
-			futureIndex := NewJobIndex(futureJob)
+			futureIndex := NewJobIndex(futureJob, futureJob.ID())
 			Expect(futureIndex.AsTemporalState()).To(Equal(temporal.Future))
 		})
 	})
@@ -114,7 +114,7 @@ var _ = Describe("JobIndex", func() {
 			// Create indices
 			indices := make([]*JobIndex, len(jobs))
 			for i, job := range jobs {
-				indices[i] = NewJobIndex(job)
+				indices[i] = NewJobIndex(job, job.ID())
 			}
 
 			// Priority items should order by trigger time
@@ -142,7 +142,7 @@ var _ = Describe("JobIndex", func() {
 	Context("Edge Cases", func() {
 		It("should handle job with nil body", func() {
 			nilJob := NewJobAutoID(time.Now().Add(time.Hour), nil)
-			nilIndex := NewJobIndex(nilJob)
+			nilIndex := NewJobIndex(nilJob, nilJob.ID())
 
 			Expect(nilIndex.SizeBytes()).To(Equal(0))
 			Expect(nilIndex.ID()).To(Equal(nilJob.ID()))
@@ -150,7 +150,7 @@ var _ = Describe("JobIndex", func() {
 
 		It("should handle job with empty body", func() {
 			emptyJob := NewJobAutoID(time.Now().Add(time.Hour), []byte{})
-			emptyIndex := NewJobIndex(emptyJob)
+			emptyIndex := NewJobIndex(emptyJob, emptyJob.ID())
 
 			Expect(emptyIndex.SizeBytes()).To(Equal(0))
 			Expect(emptyIndex.ID()).To(Equal(emptyJob.ID()))

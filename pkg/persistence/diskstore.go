@@ -82,34 +82,6 @@ func (sds *DiskJobStore) getJobPath(job interface{}, jobID string) string {
 	return filepath.Join(dirPath, jobID+".job")
 }
 
-// findJobFile searches for a job file by ID within the hierarchical structure
-func (sds *DiskJobStore) findJobFile(jobID string) (string, error) {
-	var foundPath string
-
-	err := filepath.Walk(sds.basePath, func(path string, info os.FileInfo, err error) error {
-		if err != nil {
-			return err
-		}
-
-		// Check if this is the job file we're looking for
-		if !info.IsDir() && info.Name() == jobID+".job" {
-			foundPath = path
-			return fmt.Errorf("found") // Use error to stop walking
-		}
-
-		return nil
-	})
-
-	if err != nil && err.Error() != "found" {
-		return "", err
-	}
-
-	if foundPath == "" {
-		return "", fmt.Errorf("job file not found: %s", jobID)
-	}
-
-	return foundPath, nil
-}
 
 // StoreJob stores a job on disk using the job's ID as the key
 func (sds *DiskJobStore) StoreJob(job interface{}) (string, error) {
@@ -140,24 +112,20 @@ func (sds *DiskJobStore) StoreJob(job interface{}) (string, error) {
 			return "", fmt.Errorf("failed to write job file: %w", err)
 		}
 
-		return jobID, nil
+		// Return the full file path as the key for efficient retrieval
+		return filePath, nil
 	}
 
 	return "", fmt.Errorf("job does not implement gob encoding")
 }
 
-// RetrieveJob retrieves a job from disk using its key
+// RetrieveJob retrieves a job from disk using its key (which is the full file path)
 func (sds *DiskJobStore) RetrieveJob(key string) (interface{}, error) {
 	sds.lock.RLock()
 	defer sds.lock.RUnlock()
 
-	// Find the job file in the date-based hierarchy
-	filePath, err := sds.findJobFile(key)
-	if err != nil {
-		return nil, err
-	}
-
-	data, err := os.ReadFile(filePath)
+	// Key is the full file path, read it directly
+	data, err := os.ReadFile(key)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, fmt.Errorf("job with key %s not found", key)
@@ -169,22 +137,13 @@ func (sds *DiskJobStore) RetrieveJob(key string) (interface{}, error) {
 	return data, nil
 }
 
-// DeleteJob removes a job from disk storage
+// DeleteJob removes a job from disk storage using its key (which is the full file path)
 func (sds *DiskJobStore) DeleteJob(key string) error {
 	sds.lock.Lock()
 	defer sds.lock.Unlock()
 
-	// Find and delete the job file from the date-based hierarchy
-	filePath, err := sds.findJobFile(key)
-	if err != nil {
-		// If file doesn't exist, that's fine for delete operation
-		if strings.Contains(err.Error(), "not found") {
-			return nil
-		}
-		return err
-	}
-
-	err = os.Remove(filePath)
+	// Key is the full file path, delete it directly
+	err := os.Remove(key)
 	if err != nil && !os.IsNotExist(err) {
 		return fmt.Errorf("failed to delete job file: %w", err)
 	}
@@ -230,10 +189,7 @@ func (sds *DiskJobStore) WalkJobFiles(fn func(string) error) error {
 			return nil
 		}
 
-		// Extract job ID from filename (remove .job extension)
-		filename := info.Name()
-		key := filename[:len(filename)-4]
-
-		return fn(key)
+		// Pass the full file path as the key (for compatibility with RetrieveJob)
+		return fn(path)
 	})
 }

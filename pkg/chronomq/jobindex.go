@@ -10,16 +10,18 @@ import (
 
 // JobIndex represents a lightweight reference to a Job stored on disk
 type JobIndex struct {
-	id        string    // Job ID - also used as disk key
+	id        string    // Job ID
+	diskKey   string    // Key used to retrieve job from disk storage
 	triggerAt time.Time
 	pri       int32
 	sizeBytes int       // Size of the job body for memory tracking
 }
 
-// NewJobIndex creates a new job index from a full job
-func NewJobIndex(j *Job) *JobIndex {
+// NewJobIndex creates a new job index from a full job with the specified disk key
+func NewJobIndex(j *Job, diskKey string) *JobIndex {
 	return &JobIndex{
 		id:        j.ID(),
+		diskKey:   diskKey,
 		triggerAt: j.TriggerAt(),
 		pri:       j.pri,
 		sizeBytes: len(j.Body()),
@@ -41,9 +43,9 @@ func (idx *JobIndex) Priority() int32 {
 	return idx.pri
 }
 
-// DiskKey returns the key to locate the job on disk (same as ID)
+// DiskKey returns the key to locate the job on disk
 func (idx *JobIndex) DiskKey() string {
-	return idx.id
+	return idx.diskKey
 }
 
 // SizeBytes returns the size of the job body in bytes

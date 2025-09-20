@@ -135,8 +135,22 @@ func (h *Hub) Stats() stats.Snapshot {
 	return h.stats.Read()
 }
 
+// DiskStore returns the hub's disk store for external access
+func (h *Hub) DiskStore() persistence.DiskJobStoreInterface {
+	return h.diskStore
+}
+
 // CancelJobLocked cancels a job if found. Calls are noop for unknown jobs
+// Uses fast cancel by default (no job body loading) for better performance
 func (h *Hub) CancelJobLocked(jobID string) (*Job, error) {
+	// Fast cancel by default - if job body is needed, use CancelJobWithBodyLocked
+	err := h.CancelJobFastLocked(jobID)
+	return nil, err
+}
+
+// CancelJobWithBodyLocked cancels a job and returns the job body (slower due to disk I/O)
+// Use this when you need access to the canceled job's data
+func (h *Hub) CancelJobWithBodyLocked(jobID string) (*Job, error) {
 	go metrics.Incr("hub.cancel.req")
 	id := []byte(jobID)
 
@@ -145,30 +159,83 @@ func (h *Hub) CancelJobLocked(jobID string) (*Job, error) {
 
 	if !h.jobFilter.Lookup(id) {
 		// no such job (filter can have false positives but not false negatives)
-		go metrics.Incr("hub.cancel.ok")
-		go metrics.Incr("hub.cancel.notfound")
+		go func() {
+			metrics.Incr("hub.cancel.ok")
+			metrics.Incr("hub.cancel.notfound")
+		}()
 		return nil, nil
 	}
 
-	j, err := h.cancelJob(jobID)
+	j, err := h.cancelJobWithBody(jobID)
 	if err == nil {
 		// delete from hub was successful
 		// remove from cuckoo filter (might not be present but we don't care either way)
-		if !h.jobFilter.Delete(id) {
-			go metrics.Incr("hub.cancel.should_be_unreachable")
-		}
+		filterDeleted := h.jobFilter.Delete(id)
+		go func() {
+			metrics.Incr("hub.cancel.ok")
+			if !filterDeleted {
+				metrics.Incr("hub.cancel.should_be_unreachable")
+			}
+		}()
 	} else {
 		// job not found
-		go metrics.Incr("hub.cancel.notfound")
+		go func() {
+			metrics.Incr("hub.cancel.notfound")
+		}()
 	}
 
 	return j, err
 }
 
+// CancelJobFastLocked cancels a job without loading its body (for better performance)
+// Returns only an error indicating success/failure, not the canceled job
+func (h *Hub) CancelJobFastLocked(jobID string) error {
+	id := []byte(jobID)
+
+	h.lock.Lock()
+	defer h.lock.Unlock()
+
+	// Batch metrics updates into a single goroutine
+	defer func() {
+		go func() {
+			metrics.Incr("hub.cancel.req")
+		}()
+	}()
+
+	if !h.jobFilter.Lookup(id) {
+		// no such job (filter can have false positives but not false negatives)
+		go func() {
+			metrics.Incr("hub.cancel.ok")
+			metrics.Incr("hub.cancel.notfound")
+		}()
+		return nil
+	}
+
+	err := h.cancelJobFast(jobID)
+	if err == nil {
+		// delete from hub was successful
+		// remove from cuckoo filter (might not be present but we don't care either way)
+		filterDeleted := h.jobFilter.Delete(id)
+		go func() {
+			metrics.Incr("hub.cancel.ok")
+			if !filterDeleted {
+				metrics.Incr("hub.cancel.should_be_unreachable")
+			}
+		}()
+	} else {
+		// job not found
+		go func() {
+			metrics.Incr("hub.cancel.notfound")
+		}()
+	}
+
+	return err
+}
+
 func (h *Hub) cancelJob(jobID string) (*Job, error) {
 	log.Debug().Str("jobID", jobID).Msg("canceling job in hub")
 
-	s, err := h.findOwnerSpoke(jobID)
+	s, err := h.findOwnerSpokeForCancel(jobID)
 	if err != nil {
 		log.Debug().Str("jobID", jobID).Msg("cancel found no owner spoke")
 		return nil, nil
@@ -179,6 +246,44 @@ func (h *Hub) cancelJob(jobID string) (*Job, error) {
 	if err == nil {
 		h.stats.DecrJob()
 		go metrics.Incr("hub.cancel.ok")
+	}
+	return j, err
+}
+
+// cancelJobFast cancels a job without loading its body for better performance
+func (h *Hub) cancelJobFast(jobID string) error {
+	log.Debug().Str("jobID", jobID).Msg("fast canceling job in hub")
+
+	s, err := h.findOwnerSpokeForCancel(jobID)
+	if err != nil {
+		log.Debug().Str("jobID", jobID).Msg("cancel found no owner spoke")
+		return nil
+	}
+
+	log.Debug().Str("jobID", jobID).Msg("cancel found owner spoke")
+	err = s.CancelJobFastLocked(jobID)
+	if err == nil {
+		h.stats.DecrJob()
+		// Note: metrics handled by caller to avoid duplicate goroutine creation
+	}
+	return err
+}
+
+// cancelJobWithBody cancels a job and returns the job body (loads from disk)
+func (h *Hub) cancelJobWithBody(jobID string) (*Job, error) {
+	log.Debug().Str("jobID", jobID).Msg("canceling job with body in hub")
+
+	s, err := h.findOwnerSpokeForCancel(jobID)
+	if err != nil {
+		log.Debug().Str("jobID", jobID).Msg("cancel found no owner spoke")
+		return nil, nil
+	}
+
+	log.Debug().Str("jobID", jobID).Msg("cancel found owner spoke")
+	j, err := s.CancelJobWithBodyLocked(jobID)
+	if err == nil {
+		h.stats.DecrJob()
+		// Note: metrics handled by caller to avoid duplicate goroutine creation
 	}
 	return j, err
 }
@@ -197,6 +302,27 @@ func (h *Hub) findOwnerSpoke(jobID string) (*Spoke, error) {
 	// Find the owner in the spoke map
 	for _, s := range h.spokeMap {
 		if s.OwnsJobLocked(jobID) {
+			return s, nil
+		}
+	}
+	return nil, errors.New("Cannot find job owner spoke")
+}
+
+// findOwnerSpokeForCancel returns the spoke that owns this job using read locks for better performance
+func (h *Hub) findOwnerSpokeForCancel(jobID string) (*Spoke, error) {
+	// Check past spoke first (most common case for cancellations)
+	if h.pastSpoke.OwnsJob(jobID) {
+		return h.pastSpoke, nil
+	}
+
+	// Check current spoke
+	if h.currentSpoke != nil && h.currentSpoke.OwnsJob(jobID) {
+		return h.currentSpoke, nil
+	}
+
+	// Search through future spokes (using read locks for faster scanning)
+	for _, s := range h.spokeMap {
+		if s.OwnsJob(jobID) {
 			return s, nil
 		}
 	}
@@ -549,7 +675,7 @@ func (h *Hub) RebuildIndicesFromDisk() error {
 		}
 
 		// Create job index and add to appropriate spoke
-		if err := h.addJobToSpoke(job, false); err != nil {
+		if err := h.addJobToSpoke(job, jobKey, false); err != nil {
 			log.Warn().Err(err).Str("jobID", job.ID()).Msg("Failed to add job to spoke during index rebuild")
 			return nil // Continue with next job
 		}
@@ -577,7 +703,7 @@ func (h *Hub) RebuildIndicesFromDisk() error {
 }
 
 // addJobToSpoke adds a job to the appropriate spoke (used during rebuild)
-func (h *Hub) addJobToSpoke(job *Job, persistToDisk bool) error {
+func (h *Hub) addJobToSpoke(job *Job, diskKey string, persistToDisk bool) error {
 	spoke := h.getSpokeForJob(job)
 	if spoke == nil {
 		spoke = h.createSpokeForJob(job)
@@ -588,7 +714,7 @@ func (h *Hub) addJobToSpoke(job *Job, persistToDisk bool) error {
 		return spoke.AddJobLocked(job)
 	} else {
 		// Rebuild path - job is already on disk, just add the index
-		idx := NewJobIndex(job)
+		idx := NewJobIndex(job, diskKey)
 		if err := spoke.AddJobIndexLocked(idx); err != nil {
 			return err
 		}

@@ -118,8 +118,19 @@ func (r *RPCServer) InspectN(n int, rpcJobs *[]*api.Job) error {
 	indices := r.hub.GetNJobIndices(n)
 
 	for idx := range indices {
+		// Load job body from disk for full inspection
+		var jobBody []byte
+		if dataInterface, err := r.hub.DiskStore().RetrieveJob(idx.DiskKey()); err == nil {
+			if data, ok := dataInterface.([]byte); ok {
+				tempJob := &chronomq.Job{}
+				if err := tempJob.GobDecode(data); err == nil {
+					jobBody = tempJob.Body()
+				}
+			}
+		}
+
 		rpcJob := &api.Job{
-			Body:  nil, // Don't load full body for inspection
+			Body:  jobBody,
 			ID:    idx.ID(),
 			Delay: idx.TriggerAt().Sub(time.Now()),
 		}

@@ -83,10 +83,20 @@ func (s *GRPCServer) InspectN(ctx context.Context, req *pb.InspectNRequest) (*pb
 	indices := s.hub.GetNJobIndices(int(req.N))
 	var resp []*pb.Job
 	for idx := range indices {
-		// Create a lightweight job representation from the index
+		// Load job body from disk for full inspection
+		var jobBody []byte
+		if dataInterface, err := s.hub.DiskStore().RetrieveJob(idx.DiskKey()); err == nil {
+			if data, ok := dataInterface.([]byte); ok {
+				tempJob := &chronomq.Job{}
+				if err := tempJob.GobDecode(data); err == nil {
+					jobBody = tempJob.Body()
+				}
+			}
+		}
+
 		resp = append(resp, &pb.Job{
 			Id:          idx.ID(),
-			Body:        nil, // Don't load full body for inspection
+			Body:        jobBody,
 			DelayMillis: int64(idx.TriggerAt().Sub(time.Now()).Milliseconds()),
 		})
 	}
