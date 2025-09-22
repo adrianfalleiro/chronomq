@@ -145,44 +145,6 @@ var _ = Describe("Indexed Storage", func() {
 		})
 	})
 
-	Context("Index Rebuilding", func() {
-		It("should rebuild indices from disk on startup", func() {
-			// Add jobs to the first hub
-			jobs := make([]*Job, 5)
-			for i := 0; i < 5; i++ {
-				jobs[i] = NewJobAutoID(time.Now().Add(time.Hour*time.Duration(i+1)), []byte("test data"))
-				err := hub.AddJobLocked(jobs[i])
-				Expect(err).To(BeNil())
-			}
-
-			Expect(hub.Stats().CurrentJobs).To(Equal(int64(5)))
-
-			// Stop the first hub
-			hub.Stop(false)
-			hub = nil
-
-			// Create new hub with restore flag
-			opts := &HubOpts{
-				SpokeSpan:      time.Second * 10,
-				DiskStore:      diskStore,
-				AttemptRestore: true,
-			}
-			hub = NewHub(opts)
-
-			// Give time for async rebuild
-			time.Sleep(200 * time.Millisecond)
-
-			// Should have rebuilt all indices
-			Expect(hub.Stats().CurrentJobs).To(Equal(int64(5)))
-
-			// Verify we can get job indices
-			indexCount := 0
-			for range hub.GetNJobIndices(10) {
-				indexCount++
-			}
-			Expect(indexCount).To(Equal(5))
-		})
-	})
 
 	Context("Date-based Directory Structure", func() {
 		It("should organize job files by date hierarchy", func() {

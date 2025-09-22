@@ -282,6 +282,17 @@ func (s *Spoke) retrieveJobFromDisk(diskKey string) (*Job, error) {
 	return job, nil
 }
 
+// GetJobIndex returns the JobIndex for a given job ID, or nil if not found
+func (s *Spoke) GetJobIndex(jobID string) *JobIndex {
+	s.lock.RLock()
+	defer s.lock.RUnlock()
+
+	if item, ok := s.indexMap[jobID]; ok {
+		return item.Value().(*JobIndex)
+	}
+	return nil
+}
+
 // MemoryFootprint returns the estimated memory usage of this spoke
 func (s *Spoke) MemoryFootprint() int {
 	s.lock.Lock()

@@ -10,56 +10,56 @@ import (
 
 // JobIndex represents a lightweight reference to a Job stored on disk
 type JobIndex struct {
-	id        string    // Job ID
-	diskKey   string    // Key used to retrieve job from disk storage
-	triggerAt time.Time
-	pri       int32
-	sizeBytes int       // Size of the job body for memory tracking
+	JobID     string    `json:"id"`         // Job ID
+	JobDiskKey   string    `json:"disk_key"`   // Key used to retrieve job from disk storage
+	JobTriggerAt time.Time `json:"trigger_at"`
+	JobPri       int32     `json:"priority"`
+	JobSizeBytes int       `json:"size_bytes"` // Size of the job body for memory tracking
 }
 
 // NewJobIndex creates a new job index from a full job with the specified disk key
 func NewJobIndex(j *Job, diskKey string) *JobIndex {
 	return &JobIndex{
-		id:        j.ID(),
-		diskKey:   diskKey,
-		triggerAt: j.TriggerAt(),
-		pri:       j.pri,
-		sizeBytes: len(j.Body()),
+		JobID:        j.ID(),
+		JobDiskKey:   diskKey,
+		JobTriggerAt: j.TriggerAt(),
+		JobPri:       j.pri,
+		JobSizeBytes: len(j.Body()),
 	}
 }
 
 // ID returns the job ID
 func (idx *JobIndex) ID() string {
-	return idx.id
+	return idx.JobID
 }
 
 // TriggerAt returns the job's trigger time
 func (idx *JobIndex) TriggerAt() time.Time {
-	return idx.triggerAt
+	return idx.JobTriggerAt
 }
 
 // Priority returns the job priority
 func (idx *JobIndex) Priority() int32 {
-	return idx.pri
+	return idx.JobPri
 }
 
 // DiskKey returns the key to locate the job on disk
 func (idx *JobIndex) DiskKey() string {
-	return idx.diskKey
+	return idx.JobDiskKey
 }
 
 // SizeBytes returns the size of the job body in bytes
 func (idx *JobIndex) SizeBytes() int {
-	return idx.sizeBytes
+	return idx.JobSizeBytes
 }
 
 // AsTemporalState returns the job index's temporal classification
 func (idx *JobIndex) AsTemporalState() temporal.State {
 	now := time.Now()
 	switch {
-	case now.After(idx.triggerAt):
+	case now.After(idx.JobTriggerAt):
 		return temporal.Past
-	case idx.triggerAt.After(now):
+	case idx.JobTriggerAt.After(now):
 		return temporal.Future
 	default:
 		return temporal.Current
@@ -68,22 +68,22 @@ func (idx *JobIndex) AsTemporalState() temporal.State {
 
 // AsBound returns temporal.Bound for a hypothetical spoke that should hold this job
 func (idx *JobIndex) AsBound(spokeSpan time.Duration) temporal.Bound {
-	start := idx.triggerAt.Truncate(spokeSpan)
+	start := idx.JobTriggerAt.Truncate(spokeSpan)
 	end := start.Add(spokeSpan)
 	return temporal.NewBound(start, end)
 }
 
 // AsPriorityItem returns this job index as a prioritizable item
 func (idx *JobIndex) AsPriorityItem() *queue.Item {
-	return queue.NewItem(idx, idx.triggerAt)
+	return queue.NewItem(idx, idx.JobTriggerAt)
 }
 
 // IsReady returns true if job is ready to be worked on
 func (idx *JobIndex) IsReady() bool {
-	return time.Now().After(idx.triggerAt)
+	return time.Now().After(idx.JobTriggerAt)
 }
 
 // String returns a string representation of the job index
 func (idx *JobIndex) String() string {
-	return fmt.Sprintf("JobIndex{id: %s, triggerAt: %v, diskKey: %s}", idx.id, idx.triggerAt, idx.id)
+	return fmt.Sprintf("JobIndex{id: %s, triggerAt: %v, diskKey: %s}", idx.JobID, idx.JobTriggerAt, idx.JobID)
 }

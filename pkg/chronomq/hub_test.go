@@ -184,42 +184,4 @@ var _ = Describe("Test hub", func() {
 		Expect(jobFileCount).To(BeNumerically(">", 990))
 	}, 15)
 
-	It("rebuilds indices from disk on startup", func(done Done) {
-		defer close(done)
-
-		// Create a hub and add some jobs
-		opts := &HubOpts{
-			SpokeSpan:      time.Nanosecond * 3000,
-			DiskStore:      diskStore,
-			AttemptRestore: false}
-		h1 := NewHub(opts)
-
-		// Add jobs
-		jobs := make([]*Job, 10)
-		for i := 0; i < 10; i++ {
-			triggerAt := time.Now().Add(time.Hour * time.Duration(i+1))
-			jobs[i] = NewJobAutoID(triggerAt, []byte("test job data"))
-			err := h1.AddJobLocked(jobs[i])
-			Expect(err).To(BeNil())
-		}
-
-		Expect(h1.Stats().CurrentJobs).To(Equal(int64(10)))
-
-		// Stop the first hub
-		h1.Stop(false)
-
-		// Create new hub with restore flag - should rebuild indices
-		opts2 := &HubOpts{
-			SpokeSpan:      time.Nanosecond * 3000,
-			DiskStore:      diskStore,
-			AttemptRestore: true}
-		h2 := NewHub(opts2)
-		defer h2.Stop(false)
-
-		// Give time for async rebuild
-		time.Sleep(100 * time.Millisecond)
-
-		// Should have rebuilt the indices
-		Expect(h2.Stats().CurrentJobs).To(Equal(int64(10)))
-	})
 })

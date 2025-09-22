@@ -49,6 +49,9 @@ type Hub struct {
 	spokes    *queue.PriorityQueue         // Actual spokes sorted by time
 	diskStore persistence.DiskJobStoreInterface     // Disk storage for full job data
 
+	// Centralized index for fast snapshots and lookups
+	jobIndex map[string]*JobIndex            // Master index of all jobs
+
 	pastSpoke    *Spoke // Permanently pinned to the past
 	currentSpoke *Spoke // The current spoke - started in the past or now, ends in the future or now
 
@@ -78,6 +81,7 @@ func NewHub(opts *HubOpts) *Hub {
 		spokeMap:         make(map[temporal.Bound]*Spoke),
 		spokes:           &queue.PriorityQueue{},
 		diskStore:        opts.DiskStore,
+		jobIndex:         make(map[string]*JobIndex), // Initialize centralized index
 		pastSpoke:        NewSpoke(time.Now().Add(-1*hundredYears), time.Now().Add(hundredYears), opts.DiskStore),
 		currentSpoke:     nil,
 		stats:            &stats.Counters{},
@@ -493,8 +497,25 @@ func (h *Hub) AddJobLocked(j *Job) error {
 		}
 		h.stats.IncrJob()
 		go metrics.Incr("hub.addjob")
+
+		// Add to centralized index after successful add
+		h.updateCentralizedIndex(j)
 	}
 	return err
+}
+
+// updateCentralizedIndex adds or updates a job in the centralized index
+func (h *Hub) updateCentralizedIndex(j *Job) {
+	// Find the job index from the spokes
+	spoke, err := h.findOwnerSpoke(j.ID())
+	if err != nil || spoke == nil {
+		return
+	}
+
+	// Get JobIndex from spoke
+	if idx := spoke.GetJobIndex(j.ID()); idx != nil {
+		h.jobIndex[j.ID()] = idx
+	}
 }
 
 func (h *Hub) addJob(j *Job) error {

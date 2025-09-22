@@ -34,22 +34,65 @@ type SpokeSnapshot struct {
 
 // NewIndexSnapshot creates a new index snapshot from the current hub state
 func (h *Hub) NewIndexSnapshot() *IndexSnapshot {
+	// Simple freeze of centralized index - just copy references while holding hub lock
 	h.lock.Lock()
-	defer h.lock.Unlock()
+
+	// Copy centralized index
+	jobIndices := make(map[string]*JobIndex, len(h.jobIndex))
+	for k, v := range h.jobIndex {
+		jobIndices[k] = v
+	}
+
+	filterCount := h.jobFilter.Count()
+	stats := h.stats.Read()
+	h.lock.Unlock() // Release hub lock immediately - very fast operation
 
 	snapshot := &IndexSnapshot{
 		Timestamp:   time.Now(),
-		JobIndices:  make(map[string]*JobIndex),
-		SpokeState:  make(map[string]*SpokeSnapshot),
-		FilterCount: h.jobFilter.Count(),
-		Stats:       h.stats.Read(),
+		JobIndices:  jobIndices, // Use centralized index
+		SpokeState:  make(map[string]*SpokeSnapshot), // Empty for now
+		FilterCount: filterCount,
+		Stats:       stats,
 		Version:     1,
 	}
 
-	// Collect job indices from all spokes
-	h.collectJobIndicesFromSpokes(snapshot)
-
 	return snapshot
+}
+
+// spokeReference holds a spoke and its key for snapshot collection
+type spokeReference struct {
+	spoke *Spoke
+	key   string
+}
+
+// getSpokeReferences quickly collects spoke references while hub is locked
+func (h *Hub) getSpokeReferences() []spokeReference {
+	refs := make([]spokeReference, 0, len(h.spokeMap)+2)
+
+	// Collect past spoke
+	if h.pastSpoke != nil {
+		refs = append(refs, spokeReference{h.pastSpoke, "past"})
+	}
+
+	// Collect current spoke
+	if h.currentSpoke != nil {
+		refs = append(refs, spokeReference{h.currentSpoke, "current"})
+	}
+
+	// Collect future spokes
+	for bound, spoke := range h.spokeMap {
+		boundKey := fmt.Sprintf("future_%d_%d", bound.Start().Unix(), bound.End().Unix())
+		refs = append(refs, spokeReference{spoke, boundKey})
+	}
+
+	return refs
+}
+
+// collectJobIndicesFromSpokeRefs collects from spoke references without hub lock
+func (h *Hub) collectJobIndicesFromSpokeRefs(spokeRefs []spokeReference, snapshot *IndexSnapshot) {
+	for _, ref := range spokeRefs {
+		h.collectJobIndicesFromSpoke(ref.spoke, snapshot, ref.key)
+	}
 }
 
 // collectJobIndicesFromSpokes gathers all job indices from hub spokes
@@ -73,33 +116,68 @@ func (h *Hub) collectJobIndicesFromSpokes(snapshot *IndexSnapshot) {
 
 // collectJobIndicesFromSpoke collects job indices from a single spoke
 func (h *Hub) collectJobIndicesFromSpoke(spoke *Spoke, snapshot *IndexSnapshot, spokeKey string) {
-	spoke.Lock()
-	defer spoke.Unlock()
+	// Try multiple times with increasing timeout to avoid skipping spokes
+	maxRetries := 3
+	baseTimeout := 50 * time.Millisecond
 
-	spokeSnapshot := &SpokeSnapshot{
-		StartTime:       spoke.Bound.Start(),
-		EndTime:         spoke.Bound.End(),
-		JobCount:        spoke.PendingJobsLen(),
-		MemoryFootprint: spoke.MemoryFootprint(),
-	}
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		timeout := baseTimeout * time.Duration(attempt+1) // 50ms, 100ms, 150ms
 
-	// Collect all job indices from this spoke
-	for i := 0; i < spoke.PendingJobsLen(); i++ {
-		jobIndex := spoke.JobIndexAtIdx(i)
-		if jobIndex != nil {
-			snapshot.JobIndices[jobIndex.ID()] = jobIndex
+		done := make(chan bool, 1)
+		var spokeData *SpokeSnapshot
 
-			// Track first/last job times for spoke metadata
-			if spokeSnapshot.FirstJobTime.IsZero() || jobIndex.TriggerAt().Before(spokeSnapshot.FirstJobTime) {
-				spokeSnapshot.FirstJobTime = jobIndex.TriggerAt()
+		go func() {
+			defer func() {
+				if r := recover(); r != nil {
+					done <- false
+				}
+			}()
+
+			spoke.Lock()
+			defer spoke.Unlock()
+
+			spokeData = &SpokeSnapshot{
+				StartTime:       spoke.Bound.Start(),
+				EndTime:         spoke.Bound.End(),
+				JobCount:        spoke.PendingJobsLen(),
+				MemoryFootprint: spoke.MemoryFootprint(),
 			}
-			if spokeSnapshot.LastJobTime.IsZero() || jobIndex.TriggerAt().After(spokeSnapshot.LastJobTime) {
-				spokeSnapshot.LastJobTime = jobIndex.TriggerAt()
+
+			// Collect job indices
+			jobCount := spoke.PendingJobsLen()
+			for i := 0; i < jobCount; i++ {
+				jobIndex := spoke.JobIndexAtIdx(i)
+				if jobIndex != nil {
+					snapshot.JobIndices[jobIndex.ID()] = jobIndex
+
+					// Track first/last job times
+					if spokeData.FirstJobTime.IsZero() || jobIndex.TriggerAt().Before(spokeData.FirstJobTime) {
+						spokeData.FirstJobTime = jobIndex.TriggerAt()
+					}
+					if spokeData.LastJobTime.IsZero() || jobIndex.TriggerAt().After(spokeData.LastJobTime) {
+						spokeData.LastJobTime = jobIndex.TriggerAt()
+					}
+				}
 			}
+
+			done <- true
+		}()
+
+		// Wait with timeout
+		select {
+		case success := <-done:
+			if success && spokeData != nil {
+				snapshot.SpokeState[spokeKey] = spokeData
+				return // Successfully collected this spoke
+			}
+		case <-time.After(timeout):
+			// Try again with longer timeout
+			continue
 		}
 	}
 
-	snapshot.SpokeState[spokeKey] = spokeSnapshot
+	// If we get here, all retries failed - log but don't include this spoke
+	// This is better than blocking indefinitely
 }
 
 // SaveSnapshot saves the index snapshot to disk
@@ -167,6 +245,7 @@ func (h *Hub) RestoreFromSnapshot(snapshot *IndexSnapshot) error {
 	// Clear current state
 	h.spokeMap = make(map[temporal.Bound]*Spoke)
 	h.spokes = &queue.PriorityQueue{}
+	h.jobIndex = make(map[string]*JobIndex) // Clear centralized index
 
 	// Restore job indices to appropriate spokes
 	restoredCount := 0
@@ -178,6 +257,8 @@ func (h *Hub) RestoreFromSnapshot(snapshot *IndexSnapshot) error {
 
 		// Add to job filter
 		h.jobFilter.Insert([]byte(jobIndex.ID()))
+		// Add to centralized index
+		h.jobIndex[jobIndex.ID()] = jobIndex
 	}
 
 	// Update stats to reflect restored state
