@@ -45,3 +45,8 @@ func (c *Counters) IncrSpoke() {
 func (c *Counters) DecrSpoke() {
 	atomic.AddInt64(&c.s.CurrentSpokes, -1)
 }
+
+// SetJobs sets the job count to a specific value (used during snapshot restoration)
+func (c *Counters) SetJobs(count int64) {
+	atomic.StoreInt64(&c.s.CurrentJobs, count)
+}

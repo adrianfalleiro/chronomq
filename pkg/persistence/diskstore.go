@@ -193,3 +193,26 @@ func (sds *DiskJobStore) WalkJobFiles(fn func(string) error) error {
 		return fn(path)
 	})
 }
+
+// WalkJobFilesSince efficiently walks through job files modified since the given time
+// This is used for delta replay during snapshot restoration
+func (sds *DiskJobStore) WalkJobFilesSince(since time.Time, fn func(string) error) error {
+	return filepath.Walk(sds.basePath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		// Skip directories and non-job files
+		if info.IsDir() || !strings.HasSuffix(info.Name(), ".job") {
+			return nil
+		}
+
+		// Only process files modified after the since time
+		if info.ModTime().After(since) {
+			// Pass the full file path as the key (for compatibility with RetrieveJob)
+			return fn(path)
+		}
+
+		return nil
+	})
+}

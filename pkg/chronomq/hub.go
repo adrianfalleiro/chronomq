@@ -37,6 +37,8 @@ type HubOpts struct {
 	SpokeSpan      time.Duration             // How wide should the spokes be
 	DiskStore      persistence.DiskJobStoreInterface  // Disk storage for jobs
 	MaxCFSize      uint                      // Max size of the Cuckoo Filter
+	SnapshotDir    string                    // Directory to store index snapshots
+	SnapshotInterval time.Duration           // How often to create snapshots (0 = disabled)
 }
 
 // Hub is a memory-efficient hub that stores only job indices in memory while persisting full jobs to disk
@@ -53,6 +55,10 @@ type Hub struct {
 	stats *stats.Counters
 	lock  *sync.Mutex
 
+	// Snapshotting configuration
+	snapshotDir      string
+	snapshotInterval time.Duration
+
 	ctx    context.Context
 	cancel context.CancelFunc
 }
@@ -67,17 +73,19 @@ func NewHub(opts *HubOpts) *Hub {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	h := &Hub{
-		jobFilter:    cuckoo.NewFilter(maxCFSize),
-		spokeSpan:    opts.SpokeSpan,
-		spokeMap:     make(map[temporal.Bound]*Spoke),
-		spokes:       &queue.PriorityQueue{},
-		diskStore:    opts.DiskStore,
-		pastSpoke:    NewSpoke(time.Now().Add(-1*hundredYears), time.Now().Add(hundredYears), opts.DiskStore),
-		currentSpoke: nil,
-		stats:        &stats.Counters{},
-		lock:         &sync.Mutex{},
-		ctx:          ctx,
-		cancel:       cancel,
+		jobFilter:        cuckoo.NewFilter(maxCFSize),
+		spokeSpan:        opts.SpokeSpan,
+		spokeMap:         make(map[temporal.Bound]*Spoke),
+		spokes:           &queue.PriorityQueue{},
+		diskStore:        opts.DiskStore,
+		pastSpoke:        NewSpoke(time.Now().Add(-1*hundredYears), time.Now().Add(hundredYears), opts.DiskStore),
+		currentSpoke:     nil,
+		stats:            &stats.Counters{},
+		lock:             &sync.Mutex{},
+		snapshotDir:      opts.SnapshotDir,
+		snapshotInterval: opts.SnapshotInterval,
+		ctx:              ctx,
+		cancel:           cancel,
 	}
 
 	// Set finalizer to ensure cleanup if Stop() is not called
@@ -92,8 +100,18 @@ func NewHub(opts *HubOpts) *Hub {
 	go func() {
 		if opts.AttemptRestore {
 			log.Info().Msg("Hub: Entering restore mode")
-			// Rebuild indices from disk jobs
-			err := h.RebuildIndicesFromDisk()
+
+			var err error
+			// Use snapshot-based restore only
+			if opts.SnapshotDir != "" {
+				err = h.RebuildIndicesFromSnapshot(opts.SnapshotDir)
+				if err != nil {
+					log.Error().Err(err).Msg("Hub: Snapshot restore failed - no fallback available")
+				}
+			} else {
+				log.Warn().Msg("Hub: Restore requested but no snapshot directory configured")
+			}
+
 			if err != nil {
 				log.Error().Err(err).Msg("Hub: Restore error")
 			}
@@ -101,6 +119,11 @@ func NewHub(opts *HubOpts) *Hub {
 		}
 	}()
 	go h.StatusPrinter()
+
+	// Start snapshot routine if enabled
+	if opts.SnapshotInterval > 0 && opts.SnapshotDir != "" {
+		go h.SnapshotRoutine()
+	}
 
 	return h
 }
@@ -587,6 +610,49 @@ func (h *Hub) StatusPrinter() {
 	}
 }
 
+// SnapshotRoutine periodically creates index snapshots for fast restoration
+func (h *Hub) SnapshotRoutine() {
+	if h.snapshotInterval <= 0 || h.snapshotDir == "" {
+		return
+	}
+
+	log.Info().
+		Dur("interval", h.snapshotInterval).
+		Str("snapshotDir", h.snapshotDir).
+		Msg("Starting snapshot routine")
+
+	ticker := time.NewTicker(h.snapshotInterval)
+	defer ticker.Stop()
+
+	// Cleanup timer for old snapshots (every hour)
+	cleanupTicker := time.NewTicker(time.Hour)
+	defer cleanupTicker.Stop()
+
+	for {
+		select {
+		case <-h.ctx.Done():
+			log.Info().Msg("Snapshot routine shutting down")
+			return
+
+		case <-ticker.C:
+			start := time.Now()
+			if err := h.SaveSnapshot(h.snapshotDir); err != nil {
+				log.Error().Err(err).Msg("Failed to create snapshot")
+			} else {
+				log.Info().
+					Dur("duration", time.Since(start)).
+					Msg("Created index snapshot")
+			}
+
+		case <-cleanupTicker.C:
+			// Clean up snapshots older than 24 hours
+			if err := h.CleanupOldSnapshots(h.snapshotDir, 24*time.Hour); err != nil {
+				log.Warn().Err(err).Msg("Failed to cleanup old snapshots")
+			}
+		}
+	}
+}
+
 
 // GetNJobs returns up to N job indices (not full jobs) for inspection
 func (h *Hub) GetNJobIndices(n int) chan *JobIndex {
@@ -631,75 +697,100 @@ func (h *Hub) GetNJobIndices(n int) chan *JobIndex {
 	return indexChan
 }
 
-// RebuildIndicesFromDisk scans the disk storage and rebuilds all job indices in memory
-// This method streams jobs from disk to avoid loading millions of job keys into memory at once
-func (h *Hub) RebuildIndicesFromDisk() error {
-	h.lock.Lock()
-	defer h.lock.Unlock()
 
-	log.Info().Msg("Starting index rebuild from disk...")
+// RebuildIndicesFromSnapshot loads indices from a snapshot and replays delta changes
+// This is much faster than full rebuild for large datasets
+func (h *Hub) RebuildIndicesFromSnapshot(snapshotDir string) error {
+	log.Info().Msg("Starting index rebuild from snapshot...")
 
-	// Check if disk store supports streaming walkthrough
-	diskStore, ok := h.diskStore.(interface {
-		WalkJobFiles(func(string) error) error
-	})
-	if !ok {
-		return fmt.Errorf("disk store does not support streaming job file iteration")
+	// Try to load the latest snapshot
+	snapshot, err := h.LoadLatestSnapshot(snapshotDir)
+	if err != nil {
+		return fmt.Errorf("failed to load snapshot: %w", err)
 	}
 
-	rebuiltCount := 0
-	totalCount := 0
+	// Restore indices from snapshot
+	if err := h.RestoreFromSnapshot(snapshot); err != nil {
+		return fmt.Errorf("failed to restore from snapshot: %w", err)
+	}
 
-	// Stream process jobs from disk without loading all keys into memory
-	err := diskStore.WalkJobFiles(func(jobKey string) error {
-		totalCount++
+	log.Info().
+		Time("snapshotTime", snapshot.Timestamp).
+		Int("restoredIndices", len(snapshot.JobIndices)).
+		Msg("Restored indices from snapshot")
 
+	// Replay delta changes since snapshot
+	deltaCount, err := h.replayDeltaChanges(snapshot.Timestamp)
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to replay delta changes")
+		return err
+	}
+
+	log.Info().
+		Int("deltaJobs", deltaCount).
+		Dur("snapshotAge", time.Since(snapshot.Timestamp)).
+		Msg("Index rebuild from snapshot completed")
+
+	return nil
+}
+
+// replayDeltaChanges processes jobs that were added/modified since the snapshot time
+func (h *Hub) replayDeltaChanges(since time.Time) (int, error) {
+	// Check if disk store supports time-based walking
+	diskStore, ok := h.diskStore.(interface {
+		WalkJobFilesSince(time.Time, func(string) error) error
+	})
+	if !ok {
+		log.Warn().Msg("Disk store does not support time-based iteration, skipping delta replay")
+		return 0, nil
+	}
+
+	deltaCount := 0
+
+	// Process only jobs modified since snapshot time
+	err := diskStore.WalkJobFilesSince(since, func(jobKey string) error {
 		// Load job from disk to create index
 		jobData, err := h.diskStore.RetrieveJob(jobKey)
 		if err != nil {
-			log.Warn().Err(err).Str("jobKey", jobKey).Msg("Failed to retrieve job during index rebuild")
+			log.Warn().Err(err).Str("jobKey", jobKey).Msg("Failed to retrieve job during delta replay")
 			return nil // Continue with next job
 		}
 
 		// Decode job data
 		data, ok := jobData.([]byte)
 		if !ok {
-			log.Warn().Str("jobKey", jobKey).Msg("Job data is not byte array")
+			log.Warn().Str("jobKey", jobKey).Msg("Job data is not byte array during delta replay")
 			return nil // Continue with next job
 		}
 
 		job := &Job{}
 		if err := job.GobDecode(data); err != nil {
-			log.Warn().Err(err).Str("jobKey", jobKey).Msg("Failed to decode job during index rebuild")
+			log.Warn().Err(err).Str("jobKey", jobKey).Msg("Failed to decode job during delta replay")
 			return nil // Continue with next job
 		}
 
-		// Create job index and add to appropriate spoke
+		h.lock.Lock()
+
+		// Check if job already exists (might be in snapshot)
+		id := []byte(job.ID())
+		if h.jobFilter.Lookup(id) {
+			// Job might already exist from snapshot, skip to avoid duplicates
+			h.lock.Unlock()
+			return nil
+		}
+
+		// Add new job index
 		if err := h.addJobToSpoke(job, jobKey, false); err != nil {
-			log.Warn().Err(err).Str("jobID", job.ID()).Msg("Failed to add job to spoke during index rebuild")
-			return nil // Continue with next job
+			log.Warn().Err(err).Str("jobID", job.ID()).Msg("Failed to add job to spoke during delta replay")
+		} else {
+			deltaCount++
 		}
 
-		rebuiltCount++
-
-		// Log progress every 10,000 jobs for large datasets
-		if rebuiltCount%10000 == 0 {
-			log.Info().Int("rebuiltIndices", rebuiltCount).Msg("Index rebuild progress")
-		}
-
+		h.lock.Unlock()
 		return nil
 	})
 
-	if err != nil {
-		return fmt.Errorf("failed to walk job files during rebuild: %w", err)
-	}
-
-	log.Info().
-		Int("totalDiskJobs", totalCount).
-		Int("rebuiltIndices", rebuiltCount).
-		Msg("Index rebuild completed")
-
-	return nil
+	return deltaCount, err
 }
 
 // addJobToSpoke adds a job to the appropriate spoke (used during rebuild)

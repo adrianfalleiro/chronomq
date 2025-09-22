@@ -46,10 +46,12 @@ var (
 
 // config wires in the application and configuration
 type config struct {
-	addrs       *addrs
-	jobsDir     string        // Directory for job storage
-	restore     bool          // If true, hub will attempt restore on startup
-	spokeSpan   time.Duration // Spoke duration
+	addrs           *addrs
+	jobsDir         string        // Directory for job storage
+	restore         bool          // If true, hub will attempt restore on startup
+	spokeSpan       time.Duration // Spoke duration
+	snapshotDir     string        // Directory for index snapshots
+	snapshotInterval time.Duration // How often to create snapshots (0 = disabled)
 }
 
 func init() {
@@ -57,6 +59,8 @@ func init() {
 	serverCmd.PersistentFlags().BoolVarP(&appCfg.restore, "restore", "r", false, "Restore existing data if possible from store")
 	dataDir, _ := os.Getwd()
 	serverCmd.Flags().StringVar(&appCfg.jobsDir, "jobs-dir", dataDir, "Directory for job storage")
+	serverCmd.Flags().StringVar(&appCfg.snapshotDir, "snapshot-dir", filepath.Join(dataDir, "snapshots"), "Directory for index snapshots")
+	serverCmd.Flags().DurationVar(&appCfg.snapshotInterval, "snapshot-interval", time.Minute, "How often to create index snapshots (0 = disabled)")
 
 	rootCmd.AddCommand(serverCmd)
 }
@@ -83,20 +87,15 @@ func startApp(cfg *config) {
 	diskStore := persistence.NewDiskJobStore(jobsDir)
 
 	opts := &chronomq.HubOpts{
-		AttemptRestore: cfg.restore,
-		SpokeSpan:      cfg.spokeSpan,
-		DiskStore:      diskStore,
-		MaxCFSize:      chronomq.DefaultMaxCFSize,
+		AttemptRestore:   cfg.restore,
+		SpokeSpan:        cfg.spokeSpan,
+		DiskStore:        diskStore,
+		MaxCFSize:        chronomq.DefaultMaxCFSize,
+		SnapshotDir:      cfg.snapshotDir,
+		SnapshotInterval: cfg.snapshotInterval,
 	}
 
 	h := chronomq.NewHub(opts)
-
-	// Rebuild indices from disk if restore flag is set
-	if cfg.restore {
-		if err := h.RebuildIndicesFromDisk(); err != nil {
-			log.Fatal().Err(err).Msg("Failed to rebuild indices from disk")
-		}
-	}
 
 	var rpcSRV io.Closer
 	wg := sync.WaitGroup{}
