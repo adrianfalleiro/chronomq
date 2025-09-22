@@ -5,7 +5,10 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"time"
+
+	"github.com/rs/zerolog/log"
 
 	"github.com/chronomq/chronomq/internal/queue"
 	"github.com/chronomq/chronomq/internal/stats"
@@ -337,6 +340,69 @@ func (h *Hub) CleanupOldSnapshots(snapshotDir string, maxAge time.Duration) erro
 			filePath := filepath.Join(snapshotDir, entry.Name())
 			os.Remove(filePath) // Ignore errors for cleanup
 		}
+	}
+
+	return nil
+}
+
+// CleanupExcessSnapshots keeps only the N most recent snapshots and removes the rest
+func (h *Hub) CleanupExcessSnapshots(snapshotDir string, maxSnapshots int) error {
+	if maxSnapshots <= 0 {
+		return nil // Unlimited snapshots
+	}
+
+	entries, err := os.ReadDir(snapshotDir)
+	if err != nil {
+		return err
+	}
+
+	// Collect snapshot files with their modification times
+	type snapshotInfo struct {
+		name    string
+		modTime time.Time
+	}
+
+	var snapshots []snapshotInfo
+	for _, entry := range entries {
+		if entry.IsDir() || !isSnapshotFile(entry.Name()) {
+			continue
+		}
+
+		info, err := entry.Info()
+		if err != nil {
+			continue
+		}
+
+		snapshots = append(snapshots, snapshotInfo{
+			name:    entry.Name(),
+			modTime: info.ModTime(),
+		})
+	}
+
+	// If we have fewer snapshots than maxSnapshots, nothing to clean up
+	if len(snapshots) <= maxSnapshots {
+		return nil
+	}
+
+	// Sort by modification time (newest first)
+	sort.Slice(snapshots, func(i, j int) bool {
+		return snapshots[i].modTime.After(snapshots[j].modTime)
+	})
+
+	// Remove excess snapshots (keep only the first maxSnapshots)
+	excessCount := len(snapshots) - maxSnapshots
+	for i := maxSnapshots; i < len(snapshots); i++ {
+		filePath := filepath.Join(snapshotDir, snapshots[i].name)
+		if err := os.Remove(filePath); err != nil {
+			log.Warn().Err(err).Str("file", snapshots[i].name).Msg("Failed to remove old snapshot")
+		}
+	}
+
+	if excessCount > 0 {
+		log.Info().
+			Int("removed", excessCount).
+			Int("kept", maxSnapshots).
+			Msg("Cleaned up excess snapshots")
 	}
 
 	return nil

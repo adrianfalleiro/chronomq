@@ -39,6 +39,7 @@ type HubOpts struct {
 	MaxCFSize      uint                      // Max size of the Cuckoo Filter
 	SnapshotDir    string                    // Directory to store index snapshots
 	SnapshotInterval time.Duration           // How often to create snapshots (0 = disabled)
+	MaxSnapshots   int                       // Maximum number of snapshots to keep (0 = unlimited)
 }
 
 // Hub is a memory-efficient hub that stores only job indices in memory while persisting full jobs to disk
@@ -61,6 +62,7 @@ type Hub struct {
 	// Snapshotting configuration
 	snapshotDir      string
 	snapshotInterval time.Duration
+	maxSnapshots     int
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -88,6 +90,7 @@ func NewHub(opts *HubOpts) *Hub {
 		lock:             &sync.Mutex{},
 		snapshotDir:      opts.SnapshotDir,
 		snapshotInterval: opts.SnapshotInterval,
+		maxSnapshots:     opts.MaxSnapshots,
 		ctx:              ctx,
 		cancel:           cancel,
 	}
@@ -134,6 +137,24 @@ func NewHub(opts *HubOpts) *Hub {
 
 // Stop the hub gracefully
 func (h *Hub) Stop(persist bool) {
+	// Create final snapshot before shutdown if requested
+	if persist && h.snapshotDir != "" {
+		log.Info().Msg("Creating final snapshot before shutdown...")
+		start := time.Now()
+		if err := h.SaveSnapshot(h.snapshotDir); err != nil {
+			log.Error().Err(err).Msg("Failed to create final snapshot")
+		} else {
+			log.Info().
+				Dur("duration", time.Since(start)).
+				Msg("Final snapshot created successfully")
+
+			// Clean up excess snapshots after creating final snapshot
+			if err := h.CleanupExcessSnapshots(h.snapshotDir, h.maxSnapshots); err != nil {
+				log.Warn().Err(err).Msg("Failed to cleanup excess snapshots after final snapshot")
+			}
+		}
+	}
+
 	// Cancel context to stop goroutines
 	if h.cancel != nil {
 		h.cancel()
@@ -663,12 +684,17 @@ func (h *Hub) SnapshotRoutine() {
 				log.Info().
 					Dur("duration", time.Since(start)).
 					Msg("Created index snapshot")
+
+				// Clean up excess snapshots after creating a new one
+				if err := h.CleanupExcessSnapshots(h.snapshotDir, h.maxSnapshots); err != nil {
+					log.Warn().Err(err).Msg("Failed to cleanup excess snapshots after creation")
+				}
 			}
 
 		case <-cleanupTicker.C:
-			// Clean up snapshots older than 24 hours
-			if err := h.CleanupOldSnapshots(h.snapshotDir, 24*time.Hour); err != nil {
-				log.Warn().Err(err).Msg("Failed to cleanup old snapshots")
+			// Clean up excess snapshots (keep only maxSnapshots)
+			if err := h.CleanupExcessSnapshots(h.snapshotDir, h.maxSnapshots); err != nil {
+				log.Warn().Err(err).Msg("Failed to cleanup excess snapshots")
 			}
 		}
 	}

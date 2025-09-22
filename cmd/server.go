@@ -52,6 +52,7 @@ type config struct {
 	spokeSpan       time.Duration // Spoke duration
 	snapshotDir     string        // Directory for index snapshots
 	snapshotInterval time.Duration // How often to create snapshots (0 = disabled)
+	maxSnapshots    int           // Maximum number of snapshots to keep (0 = unlimited)
 }
 
 func init() {
@@ -61,6 +62,7 @@ func init() {
 	serverCmd.Flags().StringVar(&appCfg.jobsDir, "jobs-dir", dataDir, "Directory for job storage")
 	serverCmd.Flags().StringVar(&appCfg.snapshotDir, "snapshot-dir", filepath.Join(dataDir, "snapshots"), "Directory for index snapshots")
 	serverCmd.Flags().DurationVar(&appCfg.snapshotInterval, "snapshot-interval", time.Minute, "How often to create index snapshots (0 = disabled)")
+	serverCmd.Flags().IntVar(&appCfg.maxSnapshots, "max-snapshots", 5, "Maximum number of snapshots to keep (0 = unlimited)")
 
 	rootCmd.AddCommand(serverCmd)
 }
@@ -93,6 +95,7 @@ func startApp(cfg *config) {
 		MaxCFSize:        chronomq.DefaultMaxCFSize,
 		SnapshotDir:      cfg.snapshotDir,
 		SnapshotInterval: cfg.snapshotInterval,
+		MaxSnapshots:     cfg.maxSnapshots,
 	}
 
 	h := chronomq.NewHub(opts)
