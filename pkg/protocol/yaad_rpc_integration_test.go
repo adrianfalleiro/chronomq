@@ -3,6 +3,7 @@ package protocol_test
 import (
 	"fmt"
 	"io"
+	"os"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -24,20 +25,24 @@ var _ = Describe("Test rpc protocol:", func() {
 
 	BeforeEach(func(done Done) {
 		defer close(done)
-		store, err := persistence.InMemStorage()
-		Expect(err).NotTo(HaveOccurred())
+		tempDir := "/tmp/chronomq-rpc-test"
+		os.RemoveAll(tempDir)
+		os.MkdirAll(tempDir, 0755)
+		diskStore := persistence.NewDiskJobStore(tempDir)
 		var opts = chronomq.HubOpts{
 			AttemptRestore: false,
-			Persister:      persistence.NewJournalPersister(store),
+			DiskStore:      diskStore,
 			SpokeSpan:      time.Second * 5}
 		h = chronomq.NewHub(&opts)
 		addr := fmt.Sprintf(":%d", port)
+		var err error
 		srv, err = protocol.ServeRPC(h, addr)
 		Expect(err).NotTo(HaveOccurred())
 		port++
 
 		// This ensures all contexts get a running server
 		Eventually(func() error {
+			var err error
 			client, err = api.NewClient(addr)
 			return err
 		}, "1s").Should(BeNil())

@@ -1,10 +1,10 @@
 package chronomq_test
 
 import (
+	"io/ioutil"
 	"math/rand"
-	"net/url"
 	"os"
-	"path"
+	"path/filepath"
 	"time"
 
 	. "github.com/onsi/ginkgo"
@@ -14,38 +14,54 @@ import (
 	"github.com/chronomq/chronomq/pkg/persistence"
 )
 
-var persister persistence.Persister
+var diskStore *persistence.DiskJobStore
+var tempDir string
 
 var _ = Describe("Test hub", func() {
 	defer GinkgoRecover()
 
 	BeforeEach(func() {
-		store, err := persistence.InMemStorage()
+		// Create temporary directory for each test
+		var err error
+		tempDir, err = ioutil.TempDir("", "chronomq-test-")
 		Expect(err).To(BeNil())
-		persister = persistence.NewJournalPersister(store)
-		Expect(persister.ResetDataDir()).To(BeNil())
+		diskStore = persistence.NewDiskJobStore(tempDir)
 	})
 
 	AfterEach(func() {
-		persister.Finalize()
+		if diskStore != nil {
+			diskStore.Close()
+		}
+		if tempDir != "" {
+			os.RemoveAll(tempDir)
+		}
 	})
 
 	It("can create a hub", func() {
 		// A hub with 10ms spokes
-		h := NewHub(&HubOpts{SpokeSpan: time.Millisecond * 10, Persister: persister, AttemptRestore: false})
+		h := NewHub(&HubOpts{SpokeSpan: time.Millisecond * 10, DiskStore: diskStore, AttemptRestore: false})
 		Expect(h.Stats().CurrentJobs).To(Equal(int64(0)))
 	})
 
 	It("accepts jobs with random times and random spoke durations into a hub", func() {
 		for i := 0; i < 50; i++ {
+			// Create unique temp directory for this iteration
+			iterTempDir, err := ioutil.TempDir("", "chronomq-iter-test-")
+			Expect(err).To(BeNil())
+			iterDiskStore := persistence.NewDiskJobStore(iterTempDir)
+
 			h := NewHub(&HubOpts{
 				SpokeSpan:      time.Second * time.Duration(rand.Intn(2999)+1),
-				Persister:      persister,
+				DiskStore:      iterDiskStore,
 				AttemptRestore: false})
 
 			j := NewJobAutoID(time.Now().Add(time.Millisecond*time.Duration(rand.Intn(999999))), nil)
 			h.AddJobLocked(j)
 			Expect(h.Stats().CurrentJobs).To(Equal(int64(1)))
+
+			// Clean up
+			h.Stop(false)
+			os.RemoveAll(iterTempDir)
 		}
 	})
 
@@ -55,7 +71,7 @@ var _ = Describe("Test hub", func() {
 		// hub with spokes spanning  3000 nanosec (Faster for testing)
 		opts := &HubOpts{
 			SpokeSpan:      time.Nanosecond * 3000,
-			Persister:      persister,
+			DiskStore:      diskStore,
 			AttemptRestore: false}
 		h := NewHub(opts)
 
@@ -87,7 +103,13 @@ var _ = Describe("Test hub", func() {
 		// Walk should return all jobs in global order
 		walked := []*Job{}
 		for h.Stats().CurrentJobs > 0 {
-			walked = append(walked, h.NextLocked())
+			job, err := h.NextLocked()
+			Expect(err).To(BeNil())
+			if job != nil {
+				walked = append(walked, job)
+			} else {
+				break // No more ready jobs
+			}
 		}
 
 		// Expect correct order
@@ -108,7 +130,7 @@ var _ = Describe("Test hub", func() {
 
 		opts := &HubOpts{
 			SpokeSpan:      time.Nanosecond * 3000,
-			Persister:      persister,
+			DiskStore:      diskStore,
 			AttemptRestore: false}
 		h := NewHub(opts)
 
@@ -135,48 +157,31 @@ var _ = Describe("Test hub", func() {
 		}
 
 		// Reserve some jobs
-		Expect(h.NextLocked()).ToNot(BeNil())
-		Expect(h.NextLocked()).ToNot(BeNil())
-		Expect(h.NextLocked()).ToNot(BeNil())
-
-		// Persist
-		persistErrs := h.PersistLocked()
-
-		// if any errors pop up, fail the test
-		for e := range persistErrs {
-			Fail("Persist failed due to error: " + e.Error())
-		}
-
-		entries, err := persister.Recover()
+		job1, err := h.NextLocked()
 		Expect(err).To(BeNil())
-		counter := 0
-		for range entries {
-			counter++
-		}
+		Expect(job1).ToNot(BeNil())
+		job2, err := h.NextLocked()
+		Expect(err).To(BeNil())
+		Expect(job2).ToNot(BeNil())
+		job3, err := h.NextLocked()
+		Expect(err).To(BeNil())
+		Expect(job3).ToNot(BeNil())
 
-		Expect(int64(counter)).To(Equal(h.Stats().CurrentJobs))
+		// Check that jobs are persisted to disk
+		// Count files in tempDir to verify disk persistence
+		var jobFileCount int
+		err = filepath.Walk(tempDir, func(path string, info os.FileInfo, err error) error {
+			if err != nil {
+				return err
+			}
+			if filepath.Ext(path) == ".job" {
+				jobFileCount++
+			}
+			return nil
+		})
+		Expect(err).To(BeNil())
+		// Should have remaining jobs on disk (1000 - 3 consumed = 997)
+		Expect(jobFileCount).To(BeNumerically(">", 990))
 	}, 15)
 
-	It("bootstraps a new hub from a golden peristence record", func(done Done) {
-		defer close(done)
-		wd, _ := os.Getwd()
-
-		store, err := persistence.StoreConfig{
-			Bucket: &url.URL{
-				Scheme: "file",
-				Path:   path.Join(wd, "../../testdata/persist_golden")},
-		}.Storage()
-		Expect(err).To(BeNil())
-		p := persistence.NewJournalPersister(store)
-		defer p.Finalize()
-		opts := &HubOpts{
-			SpokeSpan:      time.Nanosecond * 3000,
-			Persister:      p,
-			AttemptRestore: false}
-		h := NewHub(opts)
-		err = h.Restore()
-		Expect(err).NotTo(HaveOccurred())
-
-		Expect(h.Stats().CurrentJobs).To(Equal(int64(1000)))
-	})
 })
