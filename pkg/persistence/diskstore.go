@@ -48,38 +48,22 @@ func NewDiskJobStore(basePath string) *DiskJobStore {
 	}
 }
 
-// getJobPath returns a date-based hierarchical path for the job file
-// Creates path like: basePath/2025/01/15/14/job_id.job (YYYY/MM/DD/HH/)
+// getJobPath returns a hierarchical date-based path for the job file
+// Creates path like: basePath/2025/01/15/14/job_id.job
 func (sds *DiskJobStore) getJobPath(job interface{}, jobID string) string {
-	// Try to get trigger time from job for date-based structure
+	// Check if job has TriggerAt method to create date-based hierarchy
 	if jobWithTrigger, ok := job.(interface{ TriggerAt() time.Time }); ok {
 		triggerTime := jobWithTrigger.TriggerAt()
-
-		// Create date-based path: YYYY/MM/DD/HH/
 		year := fmt.Sprintf("%04d", triggerTime.Year())
-		month := fmt.Sprintf("%02d", int(triggerTime.Month()))
+		month := fmt.Sprintf("%02d", triggerTime.Month())
 		day := fmt.Sprintf("%02d", triggerTime.Day())
 		hour := fmt.Sprintf("%02d", triggerTime.Hour())
 
-		dirPath := filepath.Join(sds.basePath, year, month, day, hour)
-
-		// Ensure subdirectories exist
-		os.MkdirAll(dirPath, 0755)
-
-		return filepath.Join(dirPath, jobID+".job")
+		return filepath.Join(sds.basePath, year, month, day, hour, jobID+".job")
 	}
 
-	// Fallback for jobs without trigger time - use current time
-	now := time.Now()
-	year := fmt.Sprintf("%04d", now.Year())
-	month := fmt.Sprintf("%02d", int(now.Month()))
-	day := fmt.Sprintf("%02d", now.Day())
-	hour := fmt.Sprintf("%02d", now.Hour())
-
-	dirPath := filepath.Join(sds.basePath, year, month, day, hour)
-	os.MkdirAll(dirPath, 0755)
-
-	return filepath.Join(dirPath, jobID+".job")
+	// Fallback to flat structure if no trigger time available
+	return filepath.Join(sds.basePath, jobID+".job")
 }
 
 
@@ -107,6 +91,14 @@ func (sds *DiskJobStore) StoreJob(job interface{}) (string, error) {
 
 		// Write to date-based hierarchical file path
 		filePath := sds.getJobPath(job, jobID)
+
+		// Ensure directory exists
+		dir := filepath.Dir(filePath)
+		err = os.MkdirAll(dir, 0755)
+		if err != nil {
+			return "", fmt.Errorf("failed to create directory structure: %w", err)
+		}
+
 		err = os.WriteFile(filePath, data, 0644)
 		if err != nil {
 			return "", fmt.Errorf("failed to write job file: %w", err)
