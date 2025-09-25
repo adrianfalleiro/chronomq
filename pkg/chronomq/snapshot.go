@@ -1,18 +1,18 @@
 package chronomq
 
 import (
-	"encoding/gob"
-	"fmt"
-	"os"
-	"path/filepath"
-	"sort"
-	"time"
+    "encoding/gob"
+    "fmt"
+    "os"
+    "path/filepath"
+    "sort"
+    "time"
 
-	"github.com/rs/zerolog/log"
+    "github.com/rs/zerolog/log"
 
-	"github.com/chronomq/chronomq/internal/queue"
-	"github.com/chronomq/chronomq/internal/stats"
-	"github.com/chronomq/chronomq/internal/temporal"
+    "github.com/chronomq/chronomq/internal/queue"
+    "github.com/chronomq/chronomq/internal/stats"
+    "github.com/chronomq/chronomq/internal/temporal"
 )
 
 // IndexSnapshot represents a point-in-time snapshot of all job indices
@@ -62,126 +62,7 @@ func (h *Hub) NewIndexSnapshot() *IndexSnapshot {
 	return snapshot
 }
 
-// spokeReference holds a spoke and its key for snapshot collection
-type spokeReference struct {
-	spoke *Spoke
-	key   string
-}
-
-// getSpokeReferences quickly collects spoke references while hub is locked
-func (h *Hub) getSpokeReferences() []spokeReference {
-	refs := make([]spokeReference, 0, len(h.spokeMap)+2)
-
-	// Collect past spoke
-	if h.pastSpoke != nil {
-		refs = append(refs, spokeReference{h.pastSpoke, "past"})
-	}
-
-	// Collect current spoke
-	if h.currentSpoke != nil {
-		refs = append(refs, spokeReference{h.currentSpoke, "current"})
-	}
-
-	// Collect future spokes
-	for bound, spoke := range h.spokeMap {
-		boundKey := fmt.Sprintf("future_%d_%d", bound.Start().Unix(), bound.End().Unix())
-		refs = append(refs, spokeReference{spoke, boundKey})
-	}
-
-	return refs
-}
-
-// collectJobIndicesFromSpokeRefs collects from spoke references without hub lock
-func (h *Hub) collectJobIndicesFromSpokeRefs(spokeRefs []spokeReference, snapshot *IndexSnapshot) {
-	for _, ref := range spokeRefs {
-		h.collectJobIndicesFromSpoke(ref.spoke, snapshot, ref.key)
-	}
-}
-
-// collectJobIndicesFromSpokes gathers all job indices from hub spokes
-func (h *Hub) collectJobIndicesFromSpokes(snapshot *IndexSnapshot) {
-	// Collect from past spoke
-	if h.pastSpoke != nil {
-		h.collectJobIndicesFromSpoke(h.pastSpoke, snapshot, "past")
-	}
-
-	// Collect from current spoke
-	if h.currentSpoke != nil {
-		h.collectJobIndicesFromSpoke(h.currentSpoke, snapshot, "current")
-	}
-
-	// Collect from future spokes in spoke map
-	for bound, spoke := range h.spokeMap {
-		boundKey := fmt.Sprintf("future_%d_%d", bound.Start().Unix(), bound.End().Unix())
-		h.collectJobIndicesFromSpoke(spoke, snapshot, boundKey)
-	}
-}
-
-// collectJobIndicesFromSpoke collects job indices from a single spoke
-func (h *Hub) collectJobIndicesFromSpoke(spoke *Spoke, snapshot *IndexSnapshot, spokeKey string) {
-	// Try multiple times with increasing timeout to avoid skipping spokes
-	maxRetries := 3
-	baseTimeout := 50 * time.Millisecond
-
-	for attempt := 0; attempt < maxRetries; attempt++ {
-		timeout := baseTimeout * time.Duration(attempt+1) // 50ms, 100ms, 150ms
-
-		done := make(chan bool, 1)
-		var spokeData *SpokeSnapshot
-
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					done <- false
-				}
-			}()
-
-			spoke.Lock()
-			defer spoke.Unlock()
-
-			spokeData = &SpokeSnapshot{
-				StartTime:       spoke.Bound.Start(),
-				EndTime:         spoke.Bound.End(),
-				JobCount:        spoke.PendingJobsLen(),
-				MemoryFootprint: spoke.MemoryFootprint(),
-			}
-
-			// Collect job indices
-			jobCount := spoke.PendingJobsLen()
-			for i := 0; i < jobCount; i++ {
-				jobIndex := spoke.JobIndexAtIdx(i)
-				if jobIndex != nil {
-					snapshot.JobIndices[jobIndex.ID()] = jobIndex
-
-					// Track first/last job times
-					if spokeData.FirstJobTime.IsZero() || jobIndex.TriggerAt().Before(spokeData.FirstJobTime) {
-						spokeData.FirstJobTime = jobIndex.TriggerAt()
-					}
-					if spokeData.LastJobTime.IsZero() || jobIndex.TriggerAt().After(spokeData.LastJobTime) {
-						spokeData.LastJobTime = jobIndex.TriggerAt()
-					}
-				}
-			}
-
-			done <- true
-		}()
-
-		// Wait with timeout
-		select {
-		case success := <-done:
-			if success && spokeData != nil {
-				snapshot.SpokeState[spokeKey] = spokeData
-				return // Successfully collected this spoke
-			}
-		case <-time.After(timeout):
-			// Try again with longer timeout
-			continue
-		}
-	}
-
-	// If we get here, all retries failed - log but don't include this spoke
-	// This is better than blocking indefinitely
-}
+// (removed) spokeReference and spoke collection helpers
 
 // SaveSnapshot saves the index snapshot to disk
 func (h *Hub) SaveSnapshot(snapshotDir string) error {

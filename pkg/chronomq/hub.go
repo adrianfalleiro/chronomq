@@ -21,7 +21,7 @@ import (
 
 const (
 	// DefaultMaxCFSize is the default size for the cuckoo filter
-	DefaultMaxCFSize = 1000000
+	DefaultMaxCFSize uint = 500 * 1000 * 1000
 	// TestMaxCFSize is a smaller size for testing
 	TestMaxCFSize = 10000
 )
@@ -33,25 +33,25 @@ var (
 
 // HubOpts define customizations for Hub initialization
 type HubOpts struct {
-	AttemptRestore bool                      // If true, hub will try to restore from disk on start
-	SpokeSpan      time.Duration             // How wide should the spokes be
-	DiskStore      persistence.DiskJobStoreInterface  // Disk storage for jobs
-	MaxCFSize      uint                      // Max size of the Cuckoo Filter
-	SnapshotDir    string                    // Directory to store index snapshots
-	SnapshotInterval time.Duration           // How often to create snapshots (0 = disabled)
-	MaxSnapshots   int                       // Maximum number of snapshots to keep (0 = unlimited)
+	AttemptRestore   bool                              // If true, hub will try to restore from disk on start
+	SpokeSpan        time.Duration                     // How wide should the spokes be
+	DiskStore        persistence.DiskJobStoreInterface // Disk storage for jobs
+	MaxCFSize        uint                              // Max size of the Cuckoo Filter
+	SnapshotDir      string                            // Directory to store index snapshots
+	SnapshotInterval time.Duration                     // How often to create snapshots (0 = disabled)
+	MaxSnapshots     int                               // Maximum number of snapshots to keep (0 = unlimited)
 }
 
 // Hub is a memory-efficient hub that stores only job indices in memory while persisting full jobs to disk
 type Hub struct {
 	jobFilter *cuckoo.Filter
-	spokeSpan time.Duration                        // How much time does a spoke span
-	spokeMap  map[temporal.Bound]*Spoke     // Quick lookup map for spokes
-	spokes    *queue.PriorityQueue         // Actual spokes sorted by time
-	diskStore persistence.DiskJobStoreInterface     // Disk storage for full job data
+	spokeSpan time.Duration                     // How much time does a spoke span
+	spokeMap  map[temporal.Bound]*Spoke         // Quick lookup map for spokes
+	spokes    *queue.PriorityQueue              // Actual spokes sorted by time
+	diskStore persistence.DiskJobStoreInterface // Disk storage for full job data
 
 	// Centralized index for fast snapshots and lookups
-	jobIndex map[string]*JobIndex            // Master index of all jobs
+	jobIndex map[string]*JobIndex // Master index of all jobs
 
 	pastSpoke    *Spoke // Permanently pinned to the past
 	currentSpoke *Spoke // The current spoke - started in the past or now, ends in the future or now
@@ -280,23 +280,7 @@ func (h *Hub) CancelJobFastLocked(jobID string) error {
 	return err
 }
 
-func (h *Hub) cancelJob(jobID string) (*Job, error) {
-	log.Debug().Str("jobID", jobID).Msg("canceling job in hub")
-
-	s, err := h.findOwnerSpokeForCancel(jobID)
-	if err != nil {
-		log.Debug().Str("jobID", jobID).Msg("cancel found no owner spoke")
-		return nil, nil
-	}
-
-	log.Debug().Str("jobID", jobID).Msg("cancel found owner spoke")
-	j, err := s.CancelJobLocked(jobID)
-	if err == nil {
-		h.stats.DecrJob()
-		go metrics.Incr("hub.cancel.ok")
-	}
-	return j, err
-}
+// (removed) func (h *Hub) cancelJob(jobID string) (*Job, error)
 
 // cancelJobFast cancels a job without loading its body for better performance
 func (h *Hub) cancelJobFast(jobID string) error {
@@ -700,7 +684,6 @@ func (h *Hub) SnapshotRoutine() {
 	}
 }
 
-
 // GetNJobs returns up to N job indices (not full jobs) for inspection
 func (h *Hub) GetNJobIndices(n int) chan *JobIndex {
 	indexChan := make(chan *JobIndex)
@@ -743,7 +726,6 @@ func (h *Hub) GetNJobIndices(n int) chan *JobIndex {
 
 	return indexChan
 }
-
 
 // RebuildIndicesFromSnapshot loads indices from a snapshot and replays delta changes
 // This is much faster than full rebuild for large datasets
